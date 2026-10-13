@@ -41,7 +41,7 @@ const ROUTES = [
   // Perfil da staff
   ['perfil', /^#\/perfil(?:\/([0-9]{17,20}))?$/],
   // Painel da Diretoria
-  ['diretoria', /^#\/diretoria$/],
+  ['diretoria', /^#\/diretoria(?:\/(equipe|avaliacoes|produtividade|ocorrencias|cargos|alinhamentos))?$/],
 ];
 
 /** @returns {{ name: string, slug?: string, hash: string }} */

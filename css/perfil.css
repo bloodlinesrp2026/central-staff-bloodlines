@@ -74,3 +74,13 @@
   .perfil-id-info { padding-top: 36px; }
   .perfil-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Plano 11: avaliações recebidas (anônimas). */
+.perfil-eval-avg { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); margin-bottom: var(--space-4); }
+.perfil-eval { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); }
+.perfil-eval-head { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.perfil-eval-notes { margin: 0; color: var(--text-2); font-size: var(--fs-sm); }
+.perfil-eval-comment { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.perfil-eval-band[data-tone="critico"] { color: var(--danger); background: var(--danger-bg); }
+.perfil-eval-band[data-tone="regular"] { color: var(--warn); background: var(--warn-bg); }
+.perfil-eval-band[data-tone="bom"], .perfil-eval-band[data-tone="excepcional"] { color: var(--ok); background: var(--ok-bg); }

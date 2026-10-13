@@ -8,7 +8,7 @@ import {
   AL_DEFAULTS, WEBHOOK_COLUMNS, pickAlAnswers, pickAlEvaluation, pickAlParticipants, pickWebhook,
 } from './adapter.js';
 import {
-  ALLOWLIST_ERRORS, AREA_DISCORD_ERRORS, AREA_HISTORY_ACTIONS, AREA_MAX_MENTIONS, DISCORD_SEND_ERRORS, MAX_PRINTS, announcementRecipients, areaRecipients,
+  ALIGNMENT_ERRORS, ALLOWLIST_ERRORS, AREA_DISCORD_ERRORS, AREA_HISTORY_ACTIONS, alignmentDeadlineAt, validateAlignment, AREA_MAX_MENTIONS, DISCORD_SEND_ERRORS, MAX_PRINTS, announcementRecipients, areaRecipients,
   meetingList, meetingRecipients, validateDiscordRoleIds, normalizeName, printError, sentStatus, validateAlEvaluation, validateAlExtras, validateAreaMessage,
   validateWebhook,
 } from '../core/allowlist.js';
@@ -25,7 +25,8 @@ import {
 } from '../core/areas.js';
 import { PROFILE_ERRORS, pickProfileEdit, safeAvatar, validateProfileEdit } from '../core/perfil.js';
 import {
-  DIRETORIA_ERRORS, pickDirectorEvaluation, promotionRulesError, reasonError, validateDirectorEvaluation, validateOccurrence, weekOf,
+  AREA_EVAL_ERRORS, DIRETORIA_ERRORS, alignmentMeetingInput, averagesByArea, pickDirectorEvaluation, promotionRulesError, reasonError,
+  receivedEvaluationView, validateDirectorEvaluation, validateOccurrence, weekOf,
 } from '../core/diretoria.js';
 import { MEETING_STATUS_ERRORS, audienceOf, findMeetingConflict, meetingConflictMessage, participantLabel, pickMeeting, sortMeetings, validateMeeting } from '../core/agenda.js';
 import {
@@ -106,6 +107,7 @@ function allowlistState(seed, nowIso) {
 /** Painel da Diretoria: vazio no começo (como o 21_diretoria.sql). */
 const diretoriaState = () => ({
   dirEvaluations: [], occurrences: [], roleHistory: [], promotionRules: { conteudo: '', atualizado_por: null, atualizado_em: null },
+  alignments: [],
 });
 
 /** Etapa 9: personagens, histórico e anotações (vazios no começo, como o 12_lore.sql). */
@@ -1862,6 +1864,7 @@ export function createMockAdapter({
         const next = pickDirectorEvaluation(input);
         const target = state.staff.find((x) => x.discord_id === next.avaliado_id) ?? null;
         const errors = validateDirectorEvaluation(staff, target, next);
+        if (next.area_id && !state.areas.some((a) => a.id === next.area_id)) errors.area_id = AREA_EVAL_ERRORS.area;
         if (Object.keys(errors).length) return validationError(errors);
         const row = { id: uuid(), ...next, comentario: next.comentario || null, avaliador_id: staff.discord_id, criado_em: nowIso() };
         state.dirEvaluations.push(row);
@@ -1983,6 +1986,76 @@ export function createMockAdapter({
           .sort((a, b) => b.criado_em.localeCompare(a.criado_em)).slice(0, 3);
         if (!last3.length) return ok(null);
         return ok({ media: Math.round((last3.reduce((n, e) => n + e.nota_geral, 0) / last3.length) * 10) / 10, total: last3.length });
+      });
+    },
+
+    /* ----- Plano 11: avaliações por área, no perfil e alinhamentos (22_diretoria_avaliacoes_alinhamento.sql) ----- */
+    async getEvaluationsByArea({ days = 0 } = {}) {
+      return run('getEvaluationsByArea', 'staff', async ({ can }) => {
+        if (!can('diretoria.ver') && !can('diretoria.avaliacoes')) return fail('FORBIDDEN', AREA_EVAL_ERRORS.byAreaForbidden);
+        const n = Number(days) || 0;
+        const since = n > 0 ? Date.now() - n * 86400_000 : null;
+        const list = state.dirEvaluations.filter((e) => since == null || Date.parse(e.criado_em) >= since);
+        return ok(averagesByArea(list, state.areas, state.areaMembers));
+      });
+    },
+
+    async listReceivedEvaluations(discordId) {
+      return run('listReceivedEvaluations', 'staff', async ({ staff, can }) => {
+        if (String(discordId) !== staff.discord_id && !can('diretoria.ver')) return ok(null);
+        return ok(state.dirEvaluations.filter((e) => e.avaliado_id === String(discordId) && e.visivel_avaliado)
+          .sort((a, b) => b.criado_em.localeCompare(a.criado_em)).slice(0, 50)
+          .map((e) => receivedEvaluationView(e, state.areas.find((a) => a.id === e.area_id)?.nome ?? null)));
+      });
+    },
+
+    /* Simula a ação 'alinhamento' da Edge Function: mesmas travas, nada vai ao Discord de verdade; grava o registro. */
+    async callAlignment(input = {}) {
+      return run('callAlignment', 'alinhamento.chamar', async ({ staff, can }) => {
+        const a = {
+          membro_id: String(input.membro_id ?? '').trim(), mensagem: String(input.mensagem ?? '').trim(), prazo: String(input.prazo ?? ''),
+          canal_id: String(input.canal_id ?? '').trim(), link_call: String(input.link_call ?? '').trim(), reuniao_em: String(input.reuniao_em ?? '').trim(),
+        };
+        const check = validateAlignment(a, { selfId: staff.discord_id });
+        if (!check.valid) return validationError(check.errors);
+        const member = state.staff.find((s) => s.discord_id === a.membro_id);
+        if (!member?.active) return validationError({ membro_id: ALIGNMENT_ERRORS.notStaff });
+        let meetingId = null;
+        if (a.reuniao_em) {
+          if (!can('agenda.gerenciar')) return validationError({ reuniao_em: ALIGNMENT_ERRORS.noAgenda });
+          const created = await adapter.saveMeeting(alignmentMeetingInput({
+            membroId: a.membro_id, membroNome: member.display_name, selfId: staff.discord_id, mensagem: a.mensagem, reuniaoEm: a.reuniao_em, linkCall: a.link_call,
+          }));
+          if (created.error) {
+            const errs = created.error.details?.errors;
+            return errs ? validationError({ reuniao_em: errs.starts_at ?? errs._ ?? Object.values(errs)[0] }) : created;
+          }
+          meetingId = created.data.id;
+        }
+        const at = nowIso();
+        const row = {
+          id: uuid(), membro_id: a.membro_id, membro_nome: member.display_name, mensagem: a.mensagem, prazo: a.prazo,
+          prazo_em: alignmentDeadlineAt(a.prazo, new Date(at)), canal_id: a.canal_id || null, link_call: a.link_call || null, reuniao_id: meetingId,
+          dm_status: 'ok', dm_erro: null, canal_status: a.canal_id ? 'ok' : null, canal_erro: null, chamado_por: staff.discord_id, criado_em: at,
+        };
+        (state.alignments ??= []).push(row);
+        save();
+        return ok({
+          id: row.id, sent_at: at, prazo_em: row.prazo_em, reuniao_id: meetingId,
+          dm: { status: 'ok', erro: null }, canal: a.canal_id ? { status: 'ok', erro: null } : null, registrado: true,
+        });
+      });
+    },
+
+    async listAlignments({ limit = 20, offset = 0 } = {}) {
+      return run('listAlignments', 'alinhamento.chamar', async () => {
+        const all = [...(state.alignments ?? [])].sort((a, b) => b.criado_em.localeCompare(a.criado_em));
+        const size = Math.max(1, Math.min(Number(limit) || 20, 100));
+        const from = Math.max(0, Number(offset) || 0);
+        return ok({
+          items: all.slice(from, from + size).map((x) => ({ ...clone(x), membro_nome: nameOf(x.membro_id) ?? x.membro_nome, chamado_por_nome: nameOf(x.chamado_por) })),
+          total: all.length,
+        });
       });
     },
 

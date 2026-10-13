@@ -113,7 +113,81 @@ export function pickDirectorEvaluation(input = {}) {
     ...Object.fromEntries(SCORE_FIELDS.map((f) => [f.key, num(src[f.key])])),
     comentario: String(src.comentario ?? '').trim(),
     visivel_avaliado: src.visivel_avaliado !== false,
+    // Plano 11 (SQL 22): área opcional e "mostrar o comentário ao avaliado" (só vale se a avaliação é visível e tem comentário).
+    area_id: String(src.area_id ?? '').trim() || null,
+    comentario_visivel: src.comentario_visivel === true && src.visivel_avaliado !== false && Boolean(String(src.comentario ?? '').trim()),
   };
+}
+
+/* ---------------------------------------------------------------------------
+ * Plano 11 · avaliações por área e no perfil (supabase/22_diretoria_avaliacoes_alinhamento.sql).
+ * ------------------------------------------------------------------------- */
+
+/** Mensagens das travas do SQL 22: IGUAIS às do banco (o teste do banco confere). */
+export const AREA_EVAL_ERRORS = Object.freeze({
+  area: 'Área não encontrada.',
+  byAreaForbidden: 'Seu cargo não permite ver as avaliações por área.',
+});
+
+/**
+ * Médias por área, como o banco calcula em diretoria_avaliacoes_por_area: a avaliação conta na área escolhida;
+ * sem área escolhida, nas áreas atuais do avaliado; sem nenhuma, em "Sem área" (area_id null).
+ * @param {object[]} evaluations avaliações da Diretoria (com area_id opcional)
+ * @param {Array<{ id: string, nome: string, cor?: string, status?: string, ordem?: number }>} areas
+ * @param {Array<{ area_id: string, discord_id: string }>} memberships
+ */
+export function averagesByArea(evaluations = [], areas = [], memberships = []) {
+  const groups = new Map();
+  const add = (areaId, e) => {
+    const g = groups.get(areaId) ?? { ids: new Set(), rows: [] };
+    g.ids.add(e.avaliado_id);
+    g.rows.push(e);
+    groups.set(areaId, g);
+  };
+  for (const e of evaluations) {
+    if (e.area_id) { add(e.area_id, e); continue; }
+    const mine = memberships.filter((m) => m.discord_id === e.avaliado_id);
+    if (mine.length) mine.forEach((m) => add(m.area_id, e));
+    else add(null, e);
+  }
+  const avg = (rows, key) => (rows.length ? Math.round((rows.reduce((n, r) => n + Number(r[key]), 0) / rows.length) * 10) / 10 : null);
+  const line = (areaId, nome, extra, g) => ({
+    area_id: areaId, area_nome: nome, ...extra, avaliados: g?.ids.size ?? 0, avaliacoes: g?.rows.length ?? 0,
+    ...Object.fromEntries(SCORE_FIELDS.map((f) => [f.key, g ? avg(g.rows, f.key) : null])),
+  });
+  const out = [...areas]
+    .filter((a) => a.status === 'ativa' || groups.has(a.id))
+    .sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0) || a.nome.localeCompare(b.nome, 'pt-BR'))
+    .map((a) => line(a.id, a.nome, { cor: a.cor ?? null, status: a.status ?? 'ativa' }, groups.get(a.id)));
+  if (groups.has(null)) out.push(line(null, 'Sem área', { cor: null, status: null }, groups.get(null)));
+  return out;
+}
+
+/** O que o avaliado vê no perfil: só as visíveis, sem quem avaliou; comentário só se o avaliador liberou. */
+export function receivedEvaluationView(e, areaName = null) {
+  return {
+    periodo_inicio: e.periodo_inicio, periodo_fim: e.periodo_fim,
+    ...Object.fromEntries(SCORE_FIELDS.map((f) => [f.key, Number(e[f.key])])),
+    comentario: e.comentario_visivel ? e.comentario ?? null : null,
+    area_nome: areaName, criado_em: e.criado_em,
+  };
+}
+
+/** Reunião criada na Agenda junto com o alinhamento: convoca o membro chamado e quem chamou. */
+export function alignmentMeetingInput({ membroId, membroNome, selfId, mensagem, reuniaoEm, linkCall = '' }) {
+  return {
+    title: `Alinhamento com ${membroNome || membroId}`.slice(0, 150),
+    description: String(mensagem ?? '').trim().slice(0, 2000) || null,
+    starts_at: new Date(reuniaoEm).toISOString(),
+    discord_link: String(linkCall ?? '').trim() || null,
+    participants: [{ kind: 'member', value: String(membroId) }, ...(selfId && selfId !== membroId ? [{ kind: 'member', value: String(selfId) }] : [])],
+  };
+}
+
+/** Médias de cada quesito numa lista de avaliações recebidas (uma casa), ou null sem avaliações. */
+export function receivedAverages(list = []) {
+  if (!list.length) return null;
+  return Object.fromEntries(SCORE_FIELDS.map((f) => [f.key, Math.round((list.reduce((n, e) => n + Number(e[f.key]), 0) / list.length) * 10) / 10]));
 }
 
 /** Motivo da troca de cargo: até 300 caracteres, sem emoji. Devolve a mensagem ou null. */

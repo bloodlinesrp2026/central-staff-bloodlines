@@ -1,5 +1,8 @@
-// Painel da Diretoria (plano 10): #/diretoria. Só quem tem diretoria.ver (Resp. Equipe, Administrador e CEO).
+// Painel da Diretoria (plano 10): #/diretoria. O painel inteiro é de quem tem diretoria.ver (Resp. Equipe, Administrador e CEO).
 // Visão executiva da staff: indicadores, equipe, avaliações (0 a 10), produtividade, ocorrências e cargos.
+// Plano 11 (SQL 22): #/diretoria/<aba>. Quem tem só diretoria.avaliacoes (padrão: Head Staff) abre só a aba Avaliações
+// (médias por área e as avaliações do Head Staff); quem tem alinhamento.chamar vê a aba Alinhamentos. Cada aba só aparece
+// com a permissão dela, e o banco confere de novo (RLS e funções).
 // Tudo passa pelo adapter; a segurança de verdade é a RLS do 21_diretoria.sql. Texto do banco sempre via h()
 // (nó de texto); o Markdown das regras de promoção passa por render-md.js. Gráficos em SVG próprio (como a tela
 // de Produtividade): cada desenho é refeito do zero ao trocar de aba, então não sobra instância antiga.
@@ -16,8 +19,11 @@ import {
   scoreDistribution, scoreTone, validateDirectorEvaluation, validateOccurrence, weeklyTotals, weekOf,
 } from '../../core/diretoria.js';
 import { formField } from './gabarito.js';
+import { mountTeamEvaluations } from './evaluations.js';
+import { ALIGNMENT_DEADLINES, ALIGNMENT_MESSAGE_MAX, alignmentDeadline } from '../../core/allowlist.js';
 
-const TABS = Object.freeze([['equipe', 'Equipe'], ['avaliacoes', 'Avaliações'], ['produtividade', 'Produtividade'], ['ocorrencias', 'Ocorrências'], ['cargos', 'Cargos']]);
+const TABS = Object.freeze([['equipe', 'Equipe'], ['avaliacoes', 'Avaliações'], ['produtividade', 'Produtividade'], ['ocorrencias', 'Ocorrências'], ['cargos', 'Cargos'], ['alinhamentos', 'Alinhamentos']]);
+const ALIGN_PAGE = 20;
 const CACHE_MS = 5 * 60_000;
 const HISTORY_PAGE = 25;
 const SERIES = 5; // cores dos gráficos: .dir-s1 a .dir-s5 (css/diretoria.css)
@@ -152,12 +158,21 @@ function donutChart(parts) {
 
 /* ------------------------------------------------------------------ tela */
 
-export function renderDiretoria(app) {
+export function renderDiretoria(app, slug = null) {
   if (!app.feature('diretoria')) {
     restricted(app, 'Painel indisponível', 'O Painel da Diretoria ainda não foi instalado no banco de dados.');
     return null;
   }
-  if (!app.can('diretoria.ver')) {
+  // O que cada pessoa abre (as abas sem permissão nem aparecem; o banco recusa do mesmo jeito).
+  const access = {
+    full: app.can('diretoria.ver'),
+    areas: app.feature('avaliacoes_area') && (app.can('diretoria.ver') || app.can('diretoria.avaliacoes')),
+    team: app.feature('avaliacoes') && (app.can('avaliacoes.criar') || app.can('avaliacoes.ler') || app.can('avaliacoes.gerenciar')),
+    align: app.feature('alinhamento') && app.can('alinhamento.chamar'),
+  };
+  access.evals = access.full || (access.areas && app.can('diretoria.avaliacoes'));
+  const visibleTabs = TABS.filter(([key]) => (key === 'avaliacoes' ? access.evals : key === 'alinhamentos' ? access.align : access.full));
+  if (!visibleTabs.length) {
     restricted(app, 'Acesso restrito', 'O Painel da Diretoria é exclusivo de Resp. Equipe, Administrador e CEO.');
     return null;
   }
@@ -166,9 +181,10 @@ export function renderDiretoria(app) {
   let alive = true;
   const drafts = new Set();
   const ctx = {
-    tab: 'equipe', members: [], membersAt: 0, evaluations: [], occurrences: [], roleHistory: [], grid: null, rules: null,
+    tab: visibleTabs.some(([key]) => key === slug) ? slug : visibleTabs[0][0], members: [], membersAt: 0, evaluations: [], occurrences: [], roleHistory: [], grid: null, rules: null,
     team: { q: '', role: '', area: '', status: 'ativos', sort: 'cargo', dir: -1 },
-    evals: { days: '90', avaliador: '', member: '' },
+    evals: { days: '90', avaliador: '', member: '', view: '', areaDays: '90' },
+    align: { page: 0 },
     prod: { days: '56', role: '', area: '', rows: null, key: '' },
     occ: { tipo: '', membro: '', days: '0' },
     hist: { member: '', page: 0, data: null },
@@ -224,6 +240,13 @@ export function renderDiretoria(app) {
   }
 
   async function load() {
+    if (!access.full) {
+      // Só as abas Avaliações e/ou Alinhamentos: nada da equipe inteira é lido.
+      kpis.hidden = true;
+      drawTabs();
+      drawPanel();
+      return;
+    }
     const [ok, ev, oc, hist] = await Promise.all([
       loadMembers(true), app.adapter.listDirectorEvaluations(), app.adapter.listOccurrences(), loadAllHistory(),
     ]);
@@ -275,7 +298,7 @@ export function renderDiretoria(app) {
 
   /* ---------- abas ---------- */
   function drawTabs() {
-    tabs.replaceChildren(...TABS.map(([key, label]) => h('button', {
+    tabs.replaceChildren(...visibleTabs.map(([key, label]) => h('button', {
       type: 'button', class: 'dir-tab', role: 'tab', id: `dir-tab-${key}`, 'aria-selected': String(ctx.tab === key), 'aria-controls': 'dir-panel',
       onclick: () => { ctx.tab = key; drawTabs(); drawPanel(); },
     }, label)));
@@ -283,7 +306,11 @@ export function renderDiretoria(app) {
   }
 
   function drawPanel() {
-    ({ equipe: drawTeam, avaliacoes: drawEvaluations, produtividade: drawProductivity, ocorrencias: drawOccurrences, cargos: drawRoles })[ctx.tab]();
+    stopTeamEvaluations();
+    ({
+      equipe: drawTeam, avaliacoes: drawEvaluations, produtividade: drawProductivity, ocorrencias: drawOccurrences, cargos: drawRoles,
+      alinhamentos: drawAlignments,
+    })[ctx.tab]();
   }
 
   const section = (id, title, ico, ...children) => h('section', { class: 'panel dir-section', 'aria-labelledby': id },
@@ -373,7 +400,71 @@ export function renderDiretoria(app) {
   }
 
   /* ================================================================ Avaliações */
+  /* Plano 11: a aba Avaliações junta as da Diretoria (0 a 10), as médias por área e as do Head Staff (página #/avaliacoes-equipe). */
+  const EVAL_VIEWS = [
+    ['diretoria', 'Avaliações da Diretoria', access.full],
+    ['areas', 'Por área', access.areas],
+    ['equipe', 'Avaliações do Head Staff', access.team],
+  ].filter((v) => v[2]);
+  let teamCleanup = null;
+  let areaToken = 0;
+  function stopTeamEvaluations() {
+    teamCleanup?.();
+    teamCleanup = null;
+  }
+
   function drawEvaluations() {
+    stopTeamEvaluations();
+    const f = ctx.evals;
+    if (!EVAL_VIEWS.some(([key]) => key === f.view)) f.view = EVAL_VIEWS[0]?.[0] ?? '';
+    const box = h('div', { id: 'dir-eval-body' });
+    const views = EVAL_VIEWS.length > 1 && h('div', { class: 'dir-subtabs', role: 'group', 'aria-label': 'Tipo de avaliação', id: 'dir-eval-views' },
+      EVAL_VIEWS.map(([key, label]) => h('button', {
+        type: 'button', class: 'btn btn--sm dir-subtab', id: `dir-eval-view-${key}`, 'aria-pressed': String(f.view === key),
+        onclick: () => { f.view = key; drawEvaluations(); },
+      }, label)));
+    panel.replaceChildren(...[views, box].filter(Boolean));
+    if (f.view === 'diretoria') drawDirectorEvaluations(box);
+    else if (f.view === 'areas') drawByArea(box);
+    else if (f.view === 'equipe') teamCleanup = mountTeamEvaluations(app, box);
+    else box.replaceChildren(h('p', { class: 'panel-text' }, 'Nenhuma avaliação disponível para o seu cargo.'));
+  }
+
+  async function drawByArea(box) {
+    const f = ctx.evals;
+    const token = ++areaToken;
+    box.replaceChildren(h('p', { class: 'panel-text' }, 'Carregando…'));
+    const r = await app.adapter.getEvaluationsByArea({ days: f.areaDays });
+    if (!alive || token !== areaToken || !box.isConnected) return;
+    if (failed(r, 'Não foi possível carregar as médias por área.')) { box.replaceChildren(); return; }
+    const rows = r.data;
+    const rated = rows.filter((x) => x.avaliacoes > 0);
+    const dot = (cor) => {
+      const el = h('span', { class: 'dir-area-dot', 'aria-hidden': 'true' });
+      if (/^#[0-9a-fA-F]{6}$/.test(cor ?? '')) el.style.background = cor;
+      return el;
+    };
+    box.replaceChildren(
+      h('div', { class: 'dir-toolbar' },
+        h('div', { class: 'staff-filters dir-filters' },
+          filter('Período', h('select', { class: 'input input--sm', id: 'dir-area-days', onchange: (e) => { f.areaDays = e.target.value; drawByArea(box); } },
+            options(Object.entries(PERIODS), f.areaDays))))),
+      section('dir-area-chart-title', 'Nota geral por área', 'chart-bar',
+        h('p', { class: 'panel-text' }, 'Média das avaliações da Diretoria (0 a 10). A avaliação conta na área escolhida nela; sem área escolhida, nas áreas em que o membro está hoje.'),
+        rated.length
+          ? h('ul', { class: 'dir-area-bars', id: 'dir-area-bars' }, rated.map((x) => h('li', { class: 'dir-area-bar' },
+            h('span', { class: 'dir-area-name' }, dot(x.cor), x.area_nome), scoreBar(x.nota_geral))))
+          : h('p', { class: 'panel-text' }, 'Sem avaliações no período.')),
+      section('dir-area-table-title', 'Médias por área', 'list-details',
+        table('dir-area-table', 'Médias das avaliações por área',
+          ['Área', 'Avaliados', 'Avaliações', ...SCORE_FIELDS.map((x) => x.label)].map((t) => h('th', { scope: 'col' }, t)),
+          rows.map((x) => h('tr', {},
+            h('td', {}, dot(x.cor), x.area_nome, x.status === 'arquivada' ? ' (arquivada)' : ''),
+            h('td', {}, String(x.avaliados)), h('td', {}, String(x.avaliacoes)),
+            ...SCORE_FIELDS.map((k) => h('td', {}, fmt(x[k.key]))))), 'Nenhuma área cadastrada.')));
+  }
+
+  function drawDirectorEvaluations(box) {
     const f = ctx.evals;
     const list = ctx.evaluations.filter((e) => within(e.criado_em, f.days) && (!f.avaliador || e.avaliador_id === f.avaliador));
     const evaluators = [...new Set(ctx.evaluations.map((e) => e.avaliador_id))].map((id) => [id, nameOf(id)]).sort((a, b) => a[1].localeCompare(b[1], 'pt-BR'));
@@ -391,7 +482,7 @@ export function renderDiretoria(app) {
     drawEvolution();
     const sel = (id, value, pairs, onchange) => h('select', { class: 'input input--sm', id, onchange }, options(pairs, value));
 
-    panel.replaceChildren(
+    box.replaceChildren(
       h('div', { class: 'dir-toolbar' },
         h('div', { class: 'staff-filters dir-filters' },
           filter('Período', sel('dir-eval-days', f.days, Object.entries(PERIODS), (e) => { f.days = e.target.value; drawEvaluations(); })),
@@ -620,6 +711,128 @@ export function renderDiretoria(app) {
         h('button', { type: 'button', class: 'btn btn--sm', id: 'dir-hist-next', disabled: f.page + 1 >= pages ? true : null, onclick: () => go(f.page + 1) }, 'Próxima página ›')));
   }
 
+  /* ================================================================ Alinhamentos (plano 11) */
+  // Chama uma pessoa da staff para alinhamento: privado pelo bot, canal (opcional) marcando só ela e reunião na Agenda
+  // (opcional, só com agenda.gerenciar). Quem recebe é conferido no servidor (membro ativo, nunca a si mesmo).
+  let alignToken = 0;
+  const canAgenda = app.feature('agenda') && app.can('agenda.gerenciar');
+  const STATUS_TEXT = Object.freeze({ ok: '✓ Enviado', falha: '✗ Falhou' });
+
+  async function drawAlignments() {
+    const token = ++alignToken;
+    const f = ctx.align;
+    panel.replaceChildren(h('p', { class: 'panel-text' }, 'Carregando…'));
+    const [people, hist] = await Promise.all([
+      access.full ? Promise.resolve({ data: ctx.members.filter((m) => m.active), error: null }) : app.adapter.listStaffNames(),
+      app.adapter.listAlignments({ limit: ALIGN_PAGE, offset: f.page * ALIGN_PAGE }),
+    ]);
+    if (!alive || token !== alignToken || ctx.tab !== 'alinhamentos') return;
+    if (failed(people, 'Não foi possível carregar a equipe.') || failed(hist, 'Não foi possível carregar os alinhamentos.')) { panel.replaceChildren(); return; }
+    const choices = people.data.filter((m) => m.discord_id !== me.discord_id)
+      .sort((a, b) => a.display_name.localeCompare(b.display_name, 'pt-BR'))
+      .map((m) => [m.discord_id, m.role ? `${m.display_name} (${roleLabel(m.role)})` : m.display_name]);
+
+    const member = formField('dir-al-member', 'Membro', h('select', { class: 'input' }, options([['', 'Escolha um membro'], ...choices], '')));
+    const manual = formField('dir-al-id', 'ou o Discord ID', h('input', { class: 'input input--mono', type: 'text', inputmode: 'numeric', maxlength: 20, placeholder: 'Ex.: 701607812903600210' }),
+      'Use quando a pessoa não aparece na lista. Só membros ativos da staff recebem.');
+    const channel = formField('dir-al-canal', 'ID do canal (opcional)', h('input', { class: 'input input--mono', type: 'text', inputmode: 'numeric', maxlength: 20 }),
+      'Em branco: só no privado. Com o ID, o bot também posta no canal marcando só a pessoa.');
+    const deadlines = h('div', { class: 'dir-al-deadlines', role: 'radiogroup', 'aria-labelledby': 'dir-al-prazo-label' },
+      ALIGNMENT_DEADLINES.map((d) => h('label', { class: 'dir-al-deadline' },
+        h('input', { type: 'radio', name: 'dir-al-prazo', id: `dir-al-prazo-${d.code}`, value: d.code, checked: d.code === 'qualquer_momento' }), ' ', d.label)));
+    const deadlineError = h('p', { class: 'field-error', id: 'dir-al-prazo-err', hidden: true });
+    const message = formField('dir-al-msg', 'Mensagem', h('textarea', { class: 'input textarea', rows: 4, maxlength: ALIGNMENT_MESSAGE_MAX, placeholder: 'Motivo do alinhamento' }));
+    const counter = h('p', { class: 'field-hint', id: 'dir-al-count', 'aria-live': 'polite' });
+    const paint = () => { counter.textContent = `${message.input.value.length} de ${ALIGNMENT_MESSAGE_MAX} caracteres`; };
+    message.input.addEventListener('input', paint);
+    paint();
+    const call = formField('dir-al-call', 'Link da call (opcional)', h('input', { class: 'input', type: 'url', maxlength: 300, placeholder: 'https://discord.gg/...' }),
+      'Só links discord.gg ou discord.com/channels.');
+    const when = canAgenda && formField('dir-al-when', 'Reunião na Agenda (opcional)', h('input', { class: 'input', type: 'datetime-local' }),
+      'Com dia e horário, a reunião entra na Agenda com a pessoa e você.');
+    const general = h('p', { class: 'field-error', id: 'dir-al-error', role: 'alert', hidden: true });
+    const result = h('div', { id: 'dir-al-result', 'aria-live': 'polite' });
+    const send = h('button', { type: 'submit', class: 'btn btn--primary', id: 'dir-al-send', 'data-requires-online': '' }, icon('send'), 'Chamar para alinhamento');
+    const form = h('form', { class: 'dir-form dir-al-form', id: 'dir-al-form', novalidate: true },
+      h('div', { class: 'dir-form-row' }, member.el, manual.el),
+      h('div', { class: 'field' }, h('span', { class: 'field-label', id: 'dir-al-prazo-label' }, 'Prazo para o alinhamento'), deadlines, deadlineError),
+      message.el, counter,
+      h('div', { class: 'dir-form-row' }, channel.el, call.el),
+      when && when.el, general, h('div', { class: 'panel-actions' }, send), result);
+    const draft = attachFormDraft(app, 'diretoria:alinhamento', form, { bannerId: 'dir-al-draft', hasContent: (v) => Boolean(String(v['dir-al-msg'] ?? '').trim()) });
+    drafts.add(draft);
+
+    const fields = { membro_id: member, mensagem: message, canal_id: channel, link_call: call, prazo: { error: deadlineError }, ...(when ? { reuniao_em: when } : {}) };
+    const request = () => ({
+      membro_id: member.input.value || manual.input.value.trim(),
+      mensagem: message.input.value, prazo: form.querySelector('input[name="dir-al-prazo"]:checked')?.value ?? '',
+      canal_id: channel.input.value.trim(), link_call: call.input.value.trim(),
+      reuniao_em: when && when.input.value ? new Date(when.input.value).toISOString() : '',
+    });
+    const nameFor = (id) => choices.find(([v]) => v === id)?.[1] ?? id;
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (send.disabled) return;
+      const req = request();
+      showErrors(fields, general, {});
+      result.replaceChildren();
+      const d = alignmentDeadline(req.prazo);
+      const yes = await openDialog({
+        title: 'Chamar para alinhamento?',
+        body: h('div', { class: 'areas-confirm', id: 'dir-al-confirm' },
+          h('p', {}, `O bot manda no privado de ${nameFor(req.membro_id) || 'quem você escolheu'}${req.canal_id ? ` e posta no canal ${req.canal_id}` : ''}. Prazo: ${d ? d.text : '(escolha o prazo)'}.`),
+          req.reuniao_em && h('p', {}, `Reunião na Agenda: ${formatDate(req.reuniao_em, { time: true })}.`),
+          h('pre', { class: 'areas-preview' }, req.mensagem.trim())),
+        actions: [{ label: 'Voltar', value: false, variant: 'ghost', autofocus: true }, { label: 'Chamar', value: true, variant: 'primary' }],
+      });
+      if (!yes || !alive || token !== alignToken) return;
+      send.disabled = true;
+      send.textContent = 'Enviando…';
+      const r = await app.adapter.callAlignment(req);
+      if (!alive || token !== alignToken) return;
+      send.disabled = false;
+      send.replaceChildren(icon('send'), 'Chamar para alinhamento');
+      if (r.error) {
+        const errs = r.error.details?.errors;
+        showErrors(fields, general, errs ?? { _: errorText(r.error) });
+        return;
+      }
+      draft.clear();
+      const dm = r.data.dm?.status === 'ok' ? '✓ Privado enviado.' : `✗ O privado não chegou (${r.data.dm?.erro ?? 'motivo desconhecido'}).`;
+      const canal = !r.data.canal ? '' : r.data.canal.status === 'ok' ? ' ✓ Mensagem no canal enviada.' : ` ✗ ${r.data.canal.erro ?? 'O canal recusou.'}`;
+      const agenda = r.data.reuniao_id ? ' ✓ Reunião criada na Agenda.' : '';
+      toast(`Alinhamento chamado para ${nameFor(req.membro_id)}.`);
+      f.page = 0;
+      await drawAlignments();
+      document.getElementById('dir-al-result')?.replaceChildren(h('p', { class: `banner ${r.data.dm?.status === 'ok' ? 'banner--ok' : 'banner--info'}` }, `${dm}${canal}${agenda}`));
+    });
+
+    const pages = Math.max(1, Math.ceil(hist.data.total / ALIGN_PAGE));
+    const go = (page) => { f.page = page; drawAlignments(); };
+    const status = (st, erro) => (st ? h('span', { class: st === 'ok' ? 'dir-up' : 'dir-down', title: erro ?? '' }, STATUS_TEXT[st]) : h('span', { class: 'dir-muted' }, '–'));
+    panel.replaceChildren(
+      section('dir-al-title', 'Chamar para alinhamento', 'message-circle',
+        h('p', { class: 'panel-text' }, 'O bot manda a mensagem no privado da pessoa, com o prazo. Uma DM fechada não recebe; o motivo fica no registro.'),
+        form),
+      section('dir-al-hist-title', 'Alinhamentos chamados', 'history',
+        table('dir-al-table', 'Alinhamentos chamados',
+          ['Membro', 'Prazo', 'Mensagem', 'Privado', 'Canal', 'Agenda', 'Chamado por', 'Quando'].map((t) => h('th', { scope: 'col' }, t)),
+          hist.data.items.map((x) => h('tr', {},
+            h('td', {}, profileLink(x.membro_id, x.membro_nome ?? x.membro_id)),
+            h('td', {}, alignmentDeadline(x.prazo)?.label ?? x.prazo, x.prazo_em ? h('span', { class: 'dir-comment' }, `até ${ddmm(x.prazo_em)}`) : null),
+            h('td', { class: 'dir-wrap' }, x.mensagem),
+            h('td', {}, status(x.dm_status, x.dm_erro)), h('td', {}, status(x.canal_status, x.canal_erro)),
+            h('td', {}, x.reuniao_id ? h('a', { href: '#/agenda' }, 'Na Agenda') : '–'),
+            h('td', {}, x.chamado_por_nome ?? x.chamado_por),
+            h('td', {}, formatDate(x.criado_em, { time: true })))), 'Nenhum alinhamento chamado ainda.'),
+        pages > 1 && h('div', { class: 'dir-pager', id: 'dir-al-pager' },
+          h('button', { type: 'button', class: 'btn btn--sm', disabled: f.page === 0 ? true : null, onclick: () => go(f.page - 1) }, '‹ Página anterior'),
+          h('span', { class: 'dir-pager-info' }, `Página ${f.page + 1} de ${pages}`),
+          h('button', { type: 'button', class: 'btn btn--sm', disabled: f.page + 1 >= pages ? true : null, onclick: () => go(f.page + 1) }, 'Próxima página ›'))));
+    app.applyOnline?.();
+  }
+
   /* ================================================================ janelas */
 
   /**
@@ -686,14 +899,36 @@ export function renderDiretoria(app) {
     comment.input.addEventListener('input', () => { counter.textContent = `${comment.input.value.length} de ${DIRETORIA_LIMITS.comment} caracteres`; });
     const visible = h('input', { type: 'checkbox', id: 'dir-ev-visible', checked: true });
     const general = h('p', { class: 'field-error', role: 'alert', hidden: true });
+    // Plano 11 (SQL 22): área opcional e "mostrar o comentário". Sem o SQL 22 no banco, a janela fica como antes.
+    const withArea = app.feature('avaliacoes_area');
+    let area = null;
+    let showComment = null;
+    if (withArea) {
+      const list = await app.adapter.getEvaluationsByArea();
+      if (!alive) return;
+      const areas = list.error ? [] : list.data.filter((a) => a.area_id && a.status === 'ativa');
+      area = formField('dir-ev-area', 'Área (opcional)', h('select', { class: 'input' },
+        options([['', 'Sem área específica'], ...areas.map((a) => [a.area_id, a.area_nome])], '')),
+      'Sem área, a avaliação conta nas áreas em que o membro está hoje.');
+      showComment = h('input', { type: 'checkbox', id: 'dir-ev-show-comment' });
+      const sync = () => { showComment.disabled = !visible.checked; if (!visible.checked) showComment.checked = false; };
+      visible.addEventListener('change', sync);
+    }
+    const visibleText = withArea
+      ? ' Visível para o avaliado (ele vê as notas no próprio perfil, sem saber quem avaliou)'
+      : ' Visível para o avaliado (ele vê só a média, no próprio perfil)';
     const body = h('form', { class: 'dir-form', id: 'dir-ev-form', novalidate: true, onsubmit: (e) => e.preventDefault() },
-      who.el, h('div', { class: 'dir-form-row' }, start.el, end.el), h('fieldset', { class: 'dir-sliders' }, h('legend', { class: 'field-label' }, 'Notas de 0 a 10'), sliders),
+      who.el, area?.el, h('div', { class: 'dir-form-row' }, start.el, end.el), h('fieldset', { class: 'dir-sliders' }, h('legend', { class: 'field-label' }, 'Notas de 0 a 10'), sliders),
       summary, comment.el, counter,
-      h('label', { class: 'perfil-check' }, visible, ' Visível para o avaliado (ele vê só a média, no próprio perfil)'), general);
+      h('label', { class: 'perfil-check' }, visible, visibleText),
+      showComment && h('label', { class: 'perfil-check' }, showComment, ' Mostrar o comentário ao avaliado (sem o nome de quem avaliou)'), general);
     const draft = attachFormDraft(app, `diretoria:avaliacao:${preset || 'nova'}`, body, { bannerId: 'dir-ev-draft' });
     drafts.add(draft);
-    const fields = { avaliado_id: who, periodo_inicio: start, periodo_fim: end, comentario: comment, ...scoreFields };
-    const input = () => ({ avaliado_id: who.input.value, periodo_inicio: start.input.value, periodo_fim: end.input.value, ...scores(), comentario: comment.input.value, visivel_avaliado: visible.checked });
+    const fields = { avaliado_id: who, periodo_inicio: start, periodo_fim: end, comentario: comment, ...scoreFields, ...(area ? { area_id: area } : {}) };
+    const input = () => ({
+      avaliado_id: who.input.value, periodo_inicio: start.input.value, periodo_fim: end.input.value, ...scores(), comentario: comment.input.value, visivel_avaliado: visible.checked,
+      ...(withArea ? { area_id: area.input.value, comentario_visivel: showComment.checked } : {}),
+    });
     let saved = null;
     const done = await formDialog({
       title: 'Nova avaliação', body, confirmLabel: 'Salvar avaliação', draft,
@@ -772,6 +1007,7 @@ export function renderDiretoria(app) {
   load();
   return () => {
     alive = false;
+    stopTeamEvaluations();
     for (const d of drafts) d.stop();
   };
 }

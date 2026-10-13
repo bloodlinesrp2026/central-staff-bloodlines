@@ -44,16 +44,25 @@ function periodState(p, now = Date.now()) {
 /* ============================ lista ============================ */
 export function renderEvaluations(app) {
   if (denied(app)) return null;
-  const r = roles(app);
-  const me = app.state.staff.discord_id;
-  let alive = true;
-  const body = h('div', {}, h('p', { class: 'panel-text' }, 'Carregando…'));
+  const body = h('div', {});
   app.els.main.replaceChildren(h('div', { class: 'main-inner evaluations-page' },
     h('a', { class: 'back', href: '#/' }, icon('arrow-left'), 'Voltar para a lista'),
     h('header', { class: 'page-head' },
       h('h1', { class: 'page-title', tabindex: '-1' }, 'Avaliações da equipe'),
       h('p', { class: 'page-sub' }, 'O Head Staff avalia membros de cargo abaixo durante o período aberto pela Direção. Só a Direção (Resp. Equipe, Administradores e CEO) lê as avaliações enviadas; o membro avaliado nunca vê.')),
     body));
+  return mountTeamEvaluations(app, body);
+}
+
+/**
+ * Conteúdo da lista (período, Minhas avaliações, Caixa da Direção, períodos e critérios) dentro de `body`.
+ * Usado por esta página e pela aba Avaliações do Painel da Diretoria (plano 11). Devolve a limpeza.
+ */
+export function mountTeamEvaluations(app, body) {
+  const r = roles(app);
+  const me = app.state.staff.discord_id;
+  let alive = true;
+  body.replaceChildren(h('p', { class: 'panel-text' }, 'Carregando…'));
 
   async function load() {
     const [periods, criteria, evaluations, staff] = await Promise.all([

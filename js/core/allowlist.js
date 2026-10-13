@@ -896,6 +896,101 @@ export function areaSendSummary({ enviados = 0, falhas = 0 } = {}) {
   return `${enviados} ${enviados === 1 ? 'enviada' : 'enviadas'}${falhas ? `, ${falhas} ${falhas === 1 ? 'falhou' : 'falharam'}` : ''}.`;
 }
 
+/* ======================= Chamar para alinhamento (plano 11, Painel da Diretoria) ======================= */
+/** Prazos do alinhamento. `days` null = sem prazo fixo. Códigos iguais ao CHECK de alinhamentos.prazo (SQL 22). */
+export const ALIGNMENT_DEADLINES = Object.freeze([
+  Object.freeze({ code: '1_dia', label: '1 dia', days: 1, text: 'até amanhã' }),
+  Object.freeze({ code: '2_dias', label: '2 dias', days: 2, text: 'em até 2 dias' }),
+  Object.freeze({ code: '7_dias', label: '7 dias', days: 7, text: 'em até 7 dias' }),
+  Object.freeze({ code: 'qualquer_momento', label: 'A qualquer momento', days: null, text: 'a qualquer momento (sem prazo fixo)' }),
+]);
+export const ALIGNMENT_MESSAGE_MAX = 2000;
+export const ALIGNMENT_ERRORS = Object.freeze({
+  forbidden: 'Seu cargo não permite chamar para alinhamento.',
+  member: 'Escolha um membro ou informe o Discord ID (17 a 20 dígitos).',
+  notStaff: 'Só é possível chamar membros ativos da staff.',
+  self: 'Você não pode chamar a si mesmo para alinhamento.',
+  message: 'Escreva a mensagem do alinhamento.',
+  messageMax: `A mensagem pode ter até ${ALIGNMENT_MESSAGE_MAX} caracteres.`,
+  deadline: 'Escolha o prazo do alinhamento.',
+  channelId: AREA_DISCORD_ERRORS.channelId,
+  callLink: AREA_DISCORD_ERRORS.callLink,
+  meetingAt: 'Reunião na Agenda: escolha um dia e horário no futuro.',
+  noAgenda: 'Seu cargo não permite marcar reuniões na Agenda.',
+  outdatedFunction: 'A função enviar-discord instalada no Supabase é de uma versão antiga e ainda não chama para alinhamento. Avise a administração para colar o arquivo novo (supabase/functions/enviar-discord/index.ts) e clicar Deploy.',
+});
+
+export const alignmentDeadline = (code) => ALIGNMENT_DEADLINES.find((d) => d.code === code) ?? null;
+
+/** Data limite do prazo (ISO) contando a partir de `now`; null quando é "a qualquer momento". */
+export function alignmentDeadlineAt(code, now = new Date()) {
+  const d = alignmentDeadline(code);
+  return d?.days ? new Date(new Date(now).getTime() + d.days * 86_400_000).toISOString() : null;
+}
+
+/**
+ * Valida o pedido de alinhamento (mesmas regras no site, no mock e na Edge Function).
+ * @param {{ membro_id?: string, mensagem?: string, prazo?: string, canal_id?: string, link_call?: string, reuniao_em?: string }} a
+ * @param {{ selfId?: string, now?: Date }} [opts]
+ * @returns {{ valid: boolean, errors: Record<string, string> }}
+ */
+export function validateAlignment(a = {}, { selfId = '', now = new Date() } = {}) {
+  const errors = {};
+  const member = clean(a.membro_id);
+  if (!DISCORD_ID.test(member)) errors.membro_id = ALIGNMENT_ERRORS.member;
+  else if (selfId && member === selfId) errors.membro_id = ALIGNMENT_ERRORS.self;
+  const text = clean(a.mensagem);
+  if (!text) errors.mensagem = ALIGNMENT_ERRORS.message;
+  else if (text.length > ALIGNMENT_MESSAGE_MAX) errors.mensagem = ALIGNMENT_ERRORS.messageMax;
+  else if (hasEmoji(text)) errors.mensagem = NO_EMOJI_MESSAGE;
+  if (!alignmentDeadline(a.prazo)) errors.prazo = ALIGNMENT_ERRORS.deadline;
+  if (clean(a.canal_id) && !DISCORD_ID.test(clean(a.canal_id))) errors.canal_id = ALIGNMENT_ERRORS.channelId;
+  if (clean(a.link_call) && (clean(a.link_call).length > 300 || !MEETING_LINK.test(clean(a.link_call)))) errors.link_call = ALIGNMENT_ERRORS.callLink;
+  if (clean(a.reuniao_em)) {
+    const at = Date.parse(clean(a.reuniao_em));
+    if (!Number.isFinite(at) || at <= new Date(now).getTime()) errors.reuniao_em = ALIGNMENT_ERRORS.meetingAt;
+  }
+  return { valid: Object.keys(errors).length === 0, errors };
+}
+
+/** Card do alinhamento (privado e canal usam o mesmo desenho). Nunca marca ninguém por conta própria. */
+export function alignmentEmbed({ mensagem = '', senderName = '', senderRole = '', prazo = '', prazoEm = null, linkCall = '', reuniaoEm = null, now = new Date() } = {}) {
+  const call = MEETING_LINK.test(clean(linkCall)) ? clean(linkCall) : '';
+  const deadline = alignmentDeadline(prazo);
+  const role = ANNOUNCEMENT_DISCORD.roles[senderRole] ?? '';
+  const fields = [];
+  if (clean(senderName)) fields.push({ name: '✎ Chamado por', value: `${clean(senderName)}${role ? ` (${role})` : ''}`.slice(0, 256), inline: true });
+  if (deadline) fields.push({ name: '◷ Prazo', value: `${deadline.text}${prazoEm ? ` · ${discordTime(prazoEm)}` : ''}`, inline: true });
+  if (reuniaoEm) fields.push({ name: '◷ Reunião na Agenda', value: discordTime(reuniaoEm), inline: false });
+  if (call) fields.push({ name: '✆ Call no Discord', value: call, inline: false });
+  return {
+    title: 'Alinhamento solicitado',
+    description: clean(mensagem).slice(0, ALIGNMENT_MESSAGE_MAX),
+    ...(call ? { url: call } : {}),
+    color: 0x8B0000,
+    ...(fields.length ? { fields } : {}),
+    timestamp: new Date(now).toISOString(),
+    footer: { text: 'Bloodlines RP · Central da Staff' },
+  };
+}
+
+/** Mensagem do bot no privado de quem foi chamado. */
+export const buildAlignmentDm = (opts = {}) => ({
+  content: `Chamada para alinhamento: responda ${alignmentDeadline(opts.prazo)?.text ?? 'assim que puder'}.`,
+  allowed_mentions: { parse: [] },
+  embeds: [alignmentEmbed(opts)],
+});
+
+/** Mensagem do bot no canal: marca só a pessoa chamada (nunca @everyone nem @here). */
+export function buildAlignmentChannelMessage(memberId, opts = {}) {
+  const id = DISCORD_ID.test(clean(memberId)) ? clean(memberId) : '';
+  return {
+    ...(id ? { content: `<@${id}> chamada para alinhamento.` } : {}),
+    allowed_mentions: { parse: [], ...(id ? { users: [id] } : {}) },
+    embeds: [alignmentEmbed(opts)],
+  };
+}
+
 export const DISCORD_ROLE_ID_ERROR = 'ID do cargo: só números, de 17 a 20 dígitos.';
 /** Valida { cargo: id } (vazio = sem marcação para aquele cargo). */
 export function validateDiscordRoleIds(map = {}) {

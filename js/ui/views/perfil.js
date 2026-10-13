@@ -9,6 +9,7 @@ import {
   BANNER_PALETTE, DEFAULT_BANNER, PROFILE_ERRORS, PROFILE_LIMITS, initialsOf, safeAvatar, safeBanner, validateProfileEdit,
 } from '../../core/perfil.js';
 import { renderRichMarkdownInto } from '../../core/render-md.js';
+import { SCORE_FIELDS, receivedAverages, scoreAverage, scoreBand } from '../../core/diretoria.js';
 import { attachFormDraft } from '../draft.js';
 import { formField, showFieldErrors } from './gabarito.js';
 import { renderMessage } from './message.js';
@@ -40,7 +41,7 @@ export function renderPerfil(app, discordId) {
   }
   const target = discordId || app.state.staff.discord_id;
   let alive = true;
-  const ctx = { profile: null, tab: 'areas', history: null, editing: false, score: null };
+  const ctx = { profile: null, tab: 'areas', history: null, editing: false, score: null, received: null };
 
   const root = h('div', { class: 'main-inner perfil-page' }, h('p', { class: 'panel-text' }, 'Carregando…'));
   app.els.main.replaceChildren(root);
@@ -143,9 +144,12 @@ export function renderPerfil(app, discordId) {
   }
 
   /* ---------- abas ---------- */
+  // Plano 11: a aba Avaliações só existe para o dono do perfil e para a Diretoria (o banco devolve null para os outros).
+  const tabList = () => (ctx.received ? [...TABS, ['avaliacoes', 'Avaliações']] : TABS);
+
   function drawTabs() {
     return h('div', { class: 'areas-tabs perfil-tabs', role: 'tablist', 'aria-label': 'Seções do perfil' },
-      TABS.map(([key, label]) => h('button', {
+      tabList().map(([key, label]) => h('button', {
         type: 'button', class: 'areas-tab', role: 'tab', id: `perfil-tab-${key}`, 'aria-selected': String(ctx.tab === key),
         onclick: () => { ctx.tab = key; draw(); if (key === 'historico') loadHistory(true); },
       }, label)));
@@ -197,6 +201,31 @@ export function renderPerfil(app, discordId) {
     }));
   }
 
+  /** Avaliações da Diretoria recebidas: só as visíveis ao avaliado e nunca quem avaliou (perfil_avaliacoes_recebidas, SQL 22). */
+  function panelEvaluations() {
+    const list = ctx.received ?? [];
+    const fmt = (n) => (n == null ? '–' : Number(n).toFixed(1).replace('.', ','));
+    if (!list.length) return empty('Nenhuma avaliação registrada ainda.');
+    const avg = receivedAverages(list);
+    return h('div', { id: 'perfil-avaliacoes' },
+      h('p', { class: 'panel-text' }, 'Avaliações da Diretoria marcadas como visíveis. Quem avaliou não aparece.'),
+      h('div', { class: 'perfil-stats perfil-eval-avg', 'aria-label': 'Médias das avaliações' }, SCORE_FIELDS.map((f) => h('div', { class: 'perfil-stat' },
+        h('span', { class: 'perfil-stat-value' }, fmt(avg[f.key])), h('span', { class: 'perfil-stat-label' }, f.label)))),
+      h('ul', { class: 'perfil-cards', id: 'perfil-eval-list' }, list.map((e) => {
+        const media = scoreAverage(e);
+        const band = scoreBand(media);
+        const dates = e.periodo_inicio ? `${e.periodo_inicio.slice(8, 10)}/${e.periodo_inicio.slice(5, 7)} a ${e.periodo_fim.slice(8, 10)}/${e.periodo_fim.slice(5, 7)}/${e.periodo_fim.slice(0, 4)}` : '';
+        return h('li', { class: 'perfil-card perfil-eval' },
+          h('div', { class: 'perfil-eval-head' },
+            h('strong', {}, `Período ${dates}`),
+            e.area_nome && h('span', { class: 'badge' }, e.area_nome),
+            band && h('span', { class: 'badge perfil-eval-band', dataset: { tone: band.tone } }, `Média ${fmt(media)} · ${band.label}`)),
+          h('p', { class: 'perfil-eval-notes' }, SCORE_FIELDS.map((f) => `${f.label} ${fmt(e[f.key])}`).join(' · ')),
+          e.comentario && h('p', { class: 'perfil-eval-comment' }, e.comentario),
+          h('p', { class: 'perfil-when' }, `${formatDate(e.criado_em)} · Avaliação anônima`));
+      })));
+  }
+
   async function loadHistory(reset) {
     if (reset && ctx.history) return;
     const offset = ctx.history?.items.length ?? 0;
@@ -227,7 +256,8 @@ export function renderPerfil(app, discordId) {
     const panel = h('div', { class: 'perfil-panel', role: 'tabpanel', 'aria-labelledby': `perfil-tab-${ctx.tab}`, id: 'perfil-panel' },
       ctx.tab === 'areas' ? panelAreas()
         : ctx.tab === 'reunioes' ? panelMeetings()
-          : ctx.tab === 'procedimentos' ? panelProcedures() : panelHistory());
+          : ctx.tab === 'procedimentos' ? panelProcedures()
+            : ctx.tab === 'avaliacoes' && ctx.received ? panelEvaluations() : panelHistory());
     // replaceChildren escreveria "false" como texto: o filter tira os itens condicionais ausentes.
     root.replaceChildren(...[
       !p.self && h('a', { class: 'back', href: '#/equipe' }, icon('arrow-left'), 'Voltar'),
@@ -241,9 +271,15 @@ export function renderPerfil(app, discordId) {
 
   async function load() {
     const wantsScore = app.feature('diretoria') && (target === app.state.staff.discord_id || app.can('diretoria.ver'));
-    const [r, score] = await Promise.all([app.adapter.getProfile(target), wantsScore ? app.adapter.getDirectorScore(target) : null]);
+    const wantsReceived = app.feature('avaliacoes_area') && (target === app.state.staff.discord_id || app.can('diretoria.ver'));
+    const [r, score, received] = await Promise.all([
+      app.adapter.getProfile(target), wantsScore ? app.adapter.getDirectorScore(target) : null,
+      wantsReceived ? app.adapter.listReceivedEvaluations(target) : null,
+    ]);
     if (!alive) return;
     ctx.score = score && !score.error ? score.data : null;
+    ctx.received = received && !received.error ? received.data : null;
+    if (ctx.tab === 'avaliacoes' && !ctx.received) ctx.tab = 'areas';
     if (r.error) {
       const notFound = r.error.code === 'NOT_FOUND';
       renderMessage(app, { title: notFound ? 'Perfil não encontrado' : 'Não foi possível abrir o perfil', text: notFound ? PROFILE_ERRORS.notFound : errorText(r.error), back: true });

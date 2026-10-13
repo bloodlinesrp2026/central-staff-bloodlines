@@ -190,3 +190,23 @@
   .dir-hbar { grid-template-columns: minmax(70px, 110px) 1fr auto; }
   .dir-kpi-value { font-size: 26px; }
 }
+
+/* Plano 11: sub-abas de Avaliações, médias por área e Alinhamentos. */
+.dir-subtabs { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-4); }
+.dir-subtab[aria-pressed='true'] { background: var(--accent-bg); border-color: var(--accent); color: var(--accent-text); }
+.dir-subtab:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+.dir-area-dot { display: inline-block; width: 10px; height: 10px; margin-right: var(--space-2); border-radius: 50%; background: var(--border-2); vertical-align: middle; }
+.dir-area-bars { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.dir-area-bar { display: grid; grid-template-columns: minmax(120px, 220px) 1fr; gap: var(--space-3); align-items: center; }
+.dir-area-name { overflow-wrap: anywhere; }
+.dir-al-form { max-width: var(--reading-max); }
+.dir-al-deadlines { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-1); }
+.dir-al-deadline { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-3); border: 1px solid var(--border-2); border-radius: 999px; cursor: pointer; }
+.dir-al-deadline:has(input:checked) { background: var(--accent-bg); border-color: var(--accent); color: var(--accent-text); }
+#dir-al-result .banner { margin-top: var(--space-3); }
+@media (max-width: 600px) {
+  .dir-subtabs .btn { flex: 1 1 100%; }
+  .dir-area-bar { grid-template-columns: 1fr; gap: var(--space-1); }
+}
+/* Campos lado a lado com dicas de tamanhos diferentes: cada campo fica no topo, sem esticar. */
+.dir-form-row > .field { align-content: start; }

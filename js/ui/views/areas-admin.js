@@ -489,7 +489,11 @@ export function renderAreasAdmin(app) {
       h('form', { class: 'areas-editor', id: 'aa-compose', novalidate: true, onsubmit: submit },
         typeField.el, channelField && channelField.el, people, peopleError,
         h('div', { class: 'field' }, h('label', { class: 'field-label', for: 'aa-m-texto' }, 'Mensagem *'), text, counter, fields.conteudo.error),
-        roleBox, callField && callField.el, general,
+        roleBox, callField && callField.el,
+        // Plano 11: chamar UMA pessoa (qualquer membro da staff), com prazo, privado e Agenda, fica no Painel da Diretoria.
+        m.tipo === 'alinhamento' && app.feature('alinhamento') && app.can('alinhamento.chamar') && h('p', { class: 'field-hint', id: 'aa-m-align-hint' },
+          'Para chamar uma pessoa só, com prazo, privado e reunião na Agenda, use ', h('a', { href: '#/diretoria/alinhamentos' }, 'Painel da Diretoria › Alinhamentos'), '.'),
+        general,
         h('div', { class: 'areas-editor-actions' }, sendBtn)),
     ].filter(Boolean));
   }

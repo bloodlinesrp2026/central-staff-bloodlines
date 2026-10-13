@@ -9,8 +9,8 @@ import {
   AL_DEFAULTS, WEBHOOK_COLUMNS, pickAlAnswers, pickAlEvaluation, pickAlParticipants, pickWebhook,
 } from './adapter.js';
 import {
-  ALLOWLIST_ERRORS, AREA_DISCORD_ERRORS, DISCORD_SEND_ERRORS, MAX_PRINTS, validateDiscordRoleIds, printError, validateAlEvaluation, validateAlExtras,
-  validateAreaMessage, validateWebhook,
+  ALIGNMENT_ERRORS, ALLOWLIST_ERRORS, AREA_DISCORD_ERRORS, DISCORD_SEND_ERRORS, MAX_PRINTS, validateDiscordRoleIds, printError, validateAlEvaluation, validateAlExtras,
+  validateAlignment, validateAreaMessage, validateWebhook,
 } from '../core/allowlist.js';
 import { STATUSES, validateProcedure, validateStaffMember } from '../core/validate.js';
 import {
@@ -25,7 +25,8 @@ import {
 } from '../core/areas.js';
 import { PROFILE_ERRORS, pickProfileEdit, safeAvatar, validateProfileEdit } from '../core/perfil.js';
 import {
-  DIRETORIA_ERRORS, pickDirectorEvaluation, promotionRulesError, reasonError, validateDirectorEvaluation, validateOccurrence,
+  AREA_EVAL_ERRORS, DIRETORIA_ERRORS, SCORE_FIELDS, alignmentMeetingInput, pickDirectorEvaluation, promotionRulesError, reasonError,
+  validateDirectorEvaluation, validateOccurrence,
 } from '../core/diretoria.js';
 import { CONFLICT_PREFIX, MEETING_STATUS_ERRORS, participantLabel, pickMeeting, validateMeeting } from '../core/agenda.js';
 import {
@@ -183,7 +184,7 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
     [DIRETORIA_ERRORS.score]: 'nota_geral', [DIRETORIA_ERRORS.period]: 'periodo_fim', [DIRETORIA_ERRORS.comment]: 'comentario',
     [DIRETORIA_ERRORS.occSelf]: 'membro_id', [DIRETORIA_ERRORS.occAbove]: 'membro_id', [DIRETORIA_ERRORS.occType]: 'tipo',
     [DIRETORIA_ERRORS.occText]: 'descricao', [DIRETORIA_ERRORS.sameRole]: 'role', [DIRETORIA_ERRORS.roleUnknown]: 'role',
-    [DIRETORIA_ERRORS.reason]: 'motivo', [DIRETORIA_ERRORS.rules]: 'conteudo',
+    [DIRETORIA_ERRORS.reason]: 'motivo', [DIRETORIA_ERRORS.rules]: 'conteudo', [AREA_EVAL_ERRORS.area]: 'area_id',
   };
   const presentDirectorEvaluation = (e) => ({
     ...e, criado_em: new Date(e.criado_em).toISOString(),
@@ -1329,12 +1330,17 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
       const errors = validateDirectorEvaluation(staff, { discord_id: next.avaliado_id, role: 'allowlist', active: true }, next);
       if (next.avaliado_id !== staff.discord_id) delete errors.avaliado_id;
       if (Object.keys(errors).length) return validation(errors);
-      const { data: id, error, status } = await sb.rpc('registrar_avaliacao', {
+      const args = {
         p_avaliado_id: next.avaliado_id, p_periodo_inicio: next.periodo_inicio, p_periodo_fim: next.periodo_fim,
         p_nota_geral: next.nota_geral, p_nota_presenca: next.nota_presenca, p_nota_qualidade: next.nota_qualidade,
         p_nota_colaboracao: next.nota_colaboracao, p_nota_iniciativa: next.nota_iniciativa,
         p_comentario: next.comentario || null, p_visivel_avaliado: next.visivel_avaliado,
-      });
+      };
+      // Plano 11: com o SQL 22 grava também a área e o "mostrar o comentário"; sem ele, a função do 21 (banco antigo).
+      const withArea = (staff.features ?? []).includes('avaliacoes_area');
+      const { data: id, error, status } = withArea
+        ? await sb.rpc('registrar_avaliacao_area', { ...args, p_area_id: next.area_id, p_comentario_visivel: next.comentario_visivel })
+        : await sb.rpc('registrar_avaliacao', args);
       if (error) return fieldFail(error, status, DIRETORIA_FIELDS);
       const { data, error: e2, status: s2 } = await sb.from('diretoria_avaliacoes').select('*').eq('id', id).single();
       if (e2) return failFrom(e2, s2);
@@ -1432,6 +1438,82 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
       const { data, error, status } = await sb.rpc('perfil_nota_diretoria', { p_discord_id: String(discordId) });
       if (error) return failFrom(error, status);
       return ok(data ? { media: Number(data.media), total: Number(data.total) } : null);
+    },
+
+    /* ----- Plano 11: avaliações por área, no perfil e alinhamentos (22_diretoria_avaliacoes_alinhamento.sql) ----- */
+    async getEvaluationsByArea({ days = 0 } = {}) {
+      const { can, error: g } = await guard();
+      if (g) return g;
+      if (!can('diretoria.ver') && !can('diretoria.avaliacoes')) return fail('FORBIDDEN', AREA_EVAL_ERRORS.byAreaForbidden);
+      const n = Number(days) || 0;
+      const { data, error, status } = await sb.rpc('diretoria_avaliacoes_por_area', { p_desde: n > 0 ? new Date(Date.now() - n * 86400_000).toISOString() : null });
+      if (error) return failFrom(error, status);
+      const num = (v) => (v == null ? null : Number(v));
+      return ok((data ?? []).map((r) => ({
+        ...r, avaliados: Number(r.avaliados ?? 0), avaliacoes: Number(r.avaliacoes ?? 0),
+        ...Object.fromEntries(SCORE_FIELDS.map((f) => [f.key, num(r[f.key])])),
+      })));
+    },
+
+    async listReceivedEvaluations(discordId) {
+      const { error: g } = await guard();
+      if (g) return g;
+      const { data, error, status } = await sb.rpc('perfil_avaliacoes_recebidas', { p_discord_id: String(discordId) });
+      if (error) return failFrom(error, status);
+      if (data == null) return ok(null);
+      return ok(data.map((e) => ({
+        ...e, criado_em: new Date(e.criado_em).toISOString(),
+        ...Object.fromEntries(SCORE_FIELDS.map((f) => [f.key, Number(e[f.key])])),
+      })));
+    },
+
+    async callAlignment(input = {}) {
+      const { staff, can, error: g } = await guard('alinhamento.chamar');
+      if (g) return g;
+      const a = {
+        membro_id: String(input.membro_id ?? '').trim(), mensagem: String(input.mensagem ?? '').trim(), prazo: String(input.prazo ?? ''),
+        canal_id: String(input.canal_id ?? '').trim(), link_call: String(input.link_call ?? '').trim(), reuniao_em: String(input.reuniao_em ?? '').trim(),
+      };
+      const check = validateAlignment(a, { selfId: staff.discord_id });
+      if (!check.valid) return validation(check.errors);
+      let meetingId = null;
+      if (a.reuniao_em) {
+        if (!can('agenda.gerenciar')) return validation({ reuniao_em: ALIGNMENT_ERRORS.noAgenda });
+        await loadNames();
+        const created = await adapter.saveMeeting(alignmentMeetingInput({
+          membroId: a.membro_id, membroNome: nameOf(a.membro_id), selfId: staff.discord_id, mensagem: a.mensagem, reuniaoEm: a.reuniao_em, linkCall: a.link_call,
+        }));
+        if (created.error) {
+          const errs = created.error.details?.errors;
+          return errs ? validation({ reuniao_em: errs.starts_at ?? errs._ ?? Object.values(errs)[0] }) : created;
+        }
+        meetingId = created.data.id;
+      }
+      const res = await invokeSend({
+        action: 'alinhamento', membro_id: a.membro_id, mensagem: a.mensagem, prazo: a.prazo,
+        canal_id: a.canal_id || null, link_call: a.link_call || null, reuniao_id: meetingId,
+      });
+      if (res.error) {
+        // Nada foi enviado: a reunião criada para este alinhamento sai da Agenda.
+        if (meetingId) await adapter.deleteMeeting(meetingId);
+        if (res.error.message === 'Ação desconhecida.') return fail('NETWORK', ALIGNMENT_ERRORS.outdatedFunction);
+      }
+      return res;
+    },
+
+    async listAlignments({ limit = 20, offset = 0 } = {}) {
+      const { error: g } = await guard('alinhamento.chamar');
+      if (g) return g;
+      const size = Math.max(1, Math.min(Number(limit) || 20, 100));
+      const from = Math.max(0, Number(offset) || 0);
+      const { data, error, status, count } = await sb.from('alinhamentos').select('*', { count: 'exact' })
+        .order('criado_em', { ascending: false }).range(from, from + size - 1);
+      if (error) return failFrom(error, status);
+      await loadNames();
+      return ok({
+        items: data.map((x) => ({ ...x, criado_em: new Date(x.criado_em).toISOString(), membro_nome: nameOf(x.membro_id) ?? x.membro_nome, chamado_por_nome: nameOf(x.chamado_por) })),
+        total: count ?? data.length,
+      });
     },
 
     /* ----- Áreas da Staff (19_areas.sql) ----- */

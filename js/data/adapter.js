@@ -375,6 +375,24 @@
  * @property {(discordId: string) => Result<{ media: number, total: number }|null>} getDirectorScore    Staff. Média das últimas 3 avaliações da Diretoria
  *           marcadas como visíveis. Só a própria pessoa e quem tem diretoria.ver; para os outros (ou sem avaliação), null.
  *
+ * Plano 11 (22_diretoria_avaliacoes_alinhamento.sql; features "avaliacoes_area" e "alinhamento").
+ *           saveDirectorEvaluation também aceita area_id (opcional) e comentario_visivel (mostra o comentário ao avaliado; só com a
+ *           feature avaliacoes_area; sem ela os dois são ignorados). AREA_EVAL_ERRORS.area se a área não existe.
+ * @property {(f?: { days?: number|string }) => Result<object[]>} getEvaluationsByArea    diretoria.ver ou diretoria.avaliacoes. Médias das
+ *           avaliações da Diretoria por área (days 0 ou vazio = tudo): { area_id|null, area_nome, cor, status, avaliados, avaliacoes, nota_geral,
+ *           nota_presenca, nota_qualidade, nota_colaboracao, nota_iniciativa }. Sem área escolhida na avaliação, conta nas áreas atuais do
+ *           avaliado; sem nenhuma, em "Sem área" (por último). Áreas ativas sem avaliação vêm com zero e notas null.
+ * @property {(discordId: string) => Result<object[]|null>} listReceivedEvaluations    Staff. Avaliações da Diretoria VISÍVEIS ao avaliado, mais
+ *           recentes primeiro, SEM quem avaliou: { periodo_inicio, periodo_fim, nota_*, comentario (só se liberado), area_nome, criado_em }.
+ *           Só a própria pessoa e diretoria.ver; para os outros, null.
+ * @property {(a: { membro_id: string, mensagem: string, prazo: string, canal_id?: string, link_call?: string, reuniao_em?: string }) => Result<object>} callAlignment
+ *           alinhamento.chamar. Só membro ativo da staff, nunca a si mesmo. Com reuniao_em (futuro; exige agenda.gerenciar) cria antes a reunião na
+ *           Agenda (o membro e quem chamou) e a apaga se o envio falhar. O bot manda no privado e, com canal_id, no canal marcando a pessoa.
+ *           Devolve { id, sent_at, prazo_em, reuniao_id, dm: { status: 'ok'|'falha', erro }, canal: { status, erro }|null, registrado }.
+ *           VALIDATION por campo (ALIGNMENT_ERRORS).
+ * @property {(f?: { limit?: number, offset?: number }) => Result<{ items: object[], total: number }>} listAlignments    alinhamento.chamar.
+ *           Alinhamentos chamados, mais recentes primeiro, com chamado_por_nome.
+ *
  * Etapa 10 · produtividade (13_produtividade.sql; conta em js/core/productivity.js)
  * @property {(p: { from: string, to: string }) => Result<Productivity>} getProductivity   produtividade.ver. to exclusivo.
  * @property {() => Result<Array<{ discord_id: string, display_name: string }>>} listStaffNames   Staff: nomes de toda a equipe.
@@ -413,6 +431,7 @@ export const ADAPTER_METHODS = Object.freeze([
   'getProfile', 'listProfileHistory', 'updateMyProfile', 'syncMyAvatar',
   'getDiretoriaMembers', 'listDirectorEvaluations', 'saveDirectorEvaluation', 'listOccurrences', 'saveOccurrence', 'listRoleHistory',
   'changeMemberRole', 'getDiretoriaActivity', 'getPromotionRules', 'savePromotionRules', 'getDirectorScore',
+  'getEvaluationsByArea', 'listReceivedEvaluations', 'callAlignment', 'listAlignments',
   'getProductivity', 'listStaffNames',
 ]);
 
@@ -478,7 +497,7 @@ export const WEBHOOK_COLUMNS = Object.freeze([
 ]);
 
 /** Módulos que o banco pode ter (Staff.features). */
-export const FEATURES = Object.freeze(['agenda', 'allowlist', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avisos', 'diretoria', 'discord_cargos', 'lore', 'perfil', 'produtividade', 'regras']);
+export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avisos', 'diretoria', 'discord_cargos', 'lore', 'perfil', 'produtividade', 'regras']);
 
 /** Campos que o cliente pode definir. Todo o resto é do servidor. */
 export const EDITABLE_FIELDS = Object.freeze([

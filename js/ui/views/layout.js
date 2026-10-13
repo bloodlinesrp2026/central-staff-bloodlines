@@ -88,6 +88,12 @@ export function navGroups(app) {
         app.feature('produtividade') && app.can('produtividade.ver') && { href: '#/controle', ico: 'chart-bar', label: 'Produtividade', hint: 'Quem mais lê allowlist e faz entrevista.' },
         app.feature('areas') && app.can('areas.gerenciar') && { href: '#/areas/gerenciar', ico: 'settings', label: 'Gerenciar Áreas', hint: 'Criar áreas, membros, tags e comunicados.' },
         app.feature('diretoria') && app.can('diretoria.ver') && { href: '#/diretoria', ico: 'crown', label: 'Painel da Diretoria', hint: 'A equipe toda: avaliações, produtividade, ocorrências e cargos.' },
+        // Plano 11: sem diretoria.ver, o painel abre só nas abas permitidas (Avaliações e/ou Alinhamentos).
+        app.feature('diretoria') && !app.can('diretoria.ver') && app.feature('avaliacoes_area') && app.can('diretoria.avaliacoes')
+          && { href: '#/diretoria/avaliacoes', ico: 'crown', label: 'Painel da Diretoria', hint: 'Médias das avaliações por área e as avaliações do Head Staff.' },
+        app.feature('diretoria') && !app.can('diretoria.ver') && !(app.feature('avaliacoes_area') && app.can('diretoria.avaliacoes'))
+          && app.feature('alinhamento') && app.can('alinhamento.chamar')
+          && { href: '#/diretoria/alinhamentos', ico: 'crown', label: 'Painel da Diretoria', hint: 'Chamar membros para alinhamento.' },
       ],
     },
     {

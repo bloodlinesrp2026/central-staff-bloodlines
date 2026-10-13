@@ -67,6 +67,8 @@ export const PERMISSIONS = Object.freeze([
   { code: 'areas.gerenciar', description: 'Gerenciar as Áreas da Staff: áreas, membros, tags e mensagens', roles: DIRECTION },
   { code: 'diretoria.ver', description: 'Abrir o Painel da Diretoria: avaliar, registrar ocorrências e ver o histórico de cargos', roles: DIRECTION },
   { code: 'diretoria.gerenciar', description: 'Editar as regras de promoção e exportar a produtividade do Painel da Diretoria', roles: ['manager'] },
+  { code: 'diretoria.avaliacoes', description: 'Abrir a aba Avaliações do Painel da Diretoria: médias por área e avaliações do Head Staff', roles: FROM_HEAD },
+  { code: 'alinhamento.chamar', description: 'Chamar membros para alinhamento pelo bot (privado, canal e Agenda)', roles: DIRECTION },
 ].map((p) => Object.freeze({ ceoOnly: false, ...p, roles: Object.freeze([...p.roles]) })));
 
 export const PERMISSION_CODES = Object.freeze(PERMISSIONS.map((p) => p.code));
