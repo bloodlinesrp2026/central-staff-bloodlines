@@ -210,3 +210,31 @@
 }
 /* Campos lado a lado com dicas de tamanhos diferentes: cada campo fica no topo, sem esticar. */
 .dir-form-row > .field { align-content: start; }
+
+/* Plano 12: aba Decisões e ficha de decisão por membro. */
+.dir-dec-kpis { margin-bottom: var(--space-4); }
+.dir-kpi[data-kpi="periodo"] { --cor-destaque: #2980b9; }
+.dir-kpi[data-kpi="avaliados"] { --cor-destaque: #27ae60; }
+.dir-kpi[data-kpi="parados"] { --cor-destaque: #e67e22; }
+.dir-kpi[data-kpi="aguardando"] { --cor-destaque: #f39c12; }
+.dir-dec-kpis .dir-kpi-value { font-size: 24px; }
+.dir-dec-who { display: flex; gap: var(--space-3); align-items: center; margin: var(--space-3) 0; }
+.dir-dec-who > div { min-width: 0; }
+.dir-dec-name { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.dir-dec-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-4); }
+.dir-dec-sub { margin: var(--space-4) 0 var(--space-2); font-size: var(--fs-md, 1rem); }
+.dir-dec-cards { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); margin-bottom: var(--space-4); }
+.dir-dec-card { display: grid; gap: var(--space-2); align-content: start; padding: var(--space-4); background: #111111; border: 1px solid #2a2a2a; border-radius: var(--radius); min-width: 0; }
+.dir-dec-card p { margin: 0; overflow-wrap: anywhere; }
+.dir-dec-crit { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; font-size: var(--fs-sm); }
+.dir-dec-crit li { display: flex; justify-content: space-between; gap: var(--space-2); }
+.dir-dec-crit li span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.dir-dec-just { font-size: var(--fs-sm); color: var(--text-2); white-space: pre-wrap; }
+.dir-dec-status { font-size: var(--fs-sm); color: var(--warn); }
+.dir-dec-card-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.dir-dec-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; overflow-wrap: anywhere; }
+#dir-dec-form [hidden] { display: none; }
+@media (max-width: 600px) {
+  .dir-dec-actions .btn { flex: 1 1 100%; }
+  .dir-dec-cards { grid-template-columns: 1fr; }
+}

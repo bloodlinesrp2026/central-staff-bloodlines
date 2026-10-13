@@ -9,7 +9,7 @@ import {
   AL_DEFAULTS, WEBHOOK_COLUMNS, pickAlAnswers, pickAlEvaluation, pickAlParticipants, pickWebhook,
 } from './adapter.js';
 import {
-  ALIGNMENT_ERRORS, ALLOWLIST_ERRORS, AREA_DISCORD_ERRORS, DISCORD_SEND_ERRORS, MAX_PRINTS, validateDiscordRoleIds, printError, validateAlEvaluation, validateAlExtras,
+  ALIGNMENT_ERRORS, ALLOWLIST_ERRORS, AREA_DISCORD_ERRORS, DISCORD_SEND_ERRORS, EVALUATION_REMINDER_ERRORS, EVALUATION_REMINDER_KINDS, MAX_PRINTS, validateDiscordRoleIds, printError, validateAlEvaluation, validateAlExtras,
   validateAlignment, validateAreaMessage, validateWebhook,
 } from '../core/allowlist.js';
 import { STATUSES, validateProcedure, validateStaffMember } from '../core/validate.js';
@@ -30,8 +30,9 @@ import {
 } from '../core/diretoria.js';
 import { CONFLICT_PREFIX, MEETING_STATUS_ERRORS, participantLabel, pickMeeting, validateMeeting } from '../core/agenda.js';
 import {
-  PROPOSAL_ERRORS, PROPOSAL_NOTE_MAX, proposalStatus, validateAnnouncement, validateEvaluation,
+  PROPOSAL_ERRORS, PROPOSAL_NOTE_MAX, proposalStatus, validateAnnouncement, validateEvaluation, NO_EMOJI_MESSAGE, hasEmoji,
 } from '../core/workflow.js';
+import { EVALUATION_DECISION_ERRORS, criteriaNotesError, justificationError, pickCriterion, validateDecision } from '../core/avaliacoes.js';
 import {
   CEO, ROLE_CODES, canReadAudience, permissionChangesError, roleLevel, staffChangeError,
 } from '../core/permissions.js';
@@ -39,6 +40,8 @@ import {
 const STAFF_COLUMNS = 'discord_id, display_name, role, teams, active, created_at';
 const EVALUATION_COLUMNS = 'id, period_id, evaluated_id, evaluator_id, status, criteria, overall, strengths, improvements, '
   + 'feedback, recommendation, created_at, updated_at, submitted_at, read_by, read_at';
+/** Plano 12: com o SQL 23 (feature avaliacoes_decisoes) a avaliação tem a justificativa. */
+const evaluationColumns = (staff) => ((staff?.features ?? []).includes('avaliacoes_decisoes') ? `${EVALUATION_COLUMNS}, justification` : EVALUATION_COLUMNS);
 /** Nunca inclui url: o site não tem privilégio de leitura nessa coluna (10_allowlist.sql). */
 const WEBHOOK_SELECT = WEBHOOK_COLUMNS.join(', ');
 const ATTACHMENT_COLUMNS = 'id, evaluation_id, storage_path, file_name, mime, size, position, created_at';
@@ -693,9 +696,9 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
     },
 
     async listEvaluations() {
-      const { error: g } = await guard();
+      const { staff, error: g } = await guard();
       if (g) return g;
-      const { data, error, status } = await sb.from('staff_evaluations').select(EVALUATION_COLUMNS);
+      const { data, error, status } = await sb.from('staff_evaluations').select(evaluationColumns(staff));
       if (error) return failFrom(error, status);
       await loadNames();
       const when = (e) => e.submitted_at ?? e.updated_at;
@@ -703,28 +706,39 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
     },
 
     async saveEvaluation(input = {}) {
-      const { error: g } = await guard('avaliacoes.criar');
+      const { staff, error: g } = await guard('avaliacoes.criar');
       if (g) return g;
+      // Plano 12: justificativa e notas por critério só com o SQL 23; sem ele, o site antigo continua igual.
+      const plus = (staff.features ?? []).includes('avaliacoes_decisoes');
+      const columns = evaluationColumns(staff);
       let before = null;
       if (input.id) {
-        const { data, error, status } = await sb.from('staff_evaluations').select(EVALUATION_COLUMNS).eq('id', input.id).maybeSingle();
+        const { data, error, status } = await sb.from('staff_evaluations').select(columns).eq('id', input.id).maybeSingle();
         if (error) return failFrom(error, status);
         if (!data) return fail('NOT_FOUND', 'Avaliação não encontrada.');
         before = data;
       }
-      const fields = ['period_id', 'evaluated_id', 'status', 'criteria', 'overall', 'strengths', 'improvements', 'feedback', 'recommendation'];
-      const after = { ...(before ?? { status: 'rascunho', criteria: [], overall: null, strengths: '', improvements: '', feedback: '', recommendation: null }) };
+      const fields = ['period_id', 'evaluated_id', 'status', 'criteria', 'overall', 'strengths', 'improvements', 'feedback', 'recommendation',
+        ...(plus ? ['justification'] : [])];
+      const after = { ...(before ?? { status: 'rascunho', criteria: [], overall: null, strengths: '', improvements: '', feedback: '', recommendation: null, justification: '' }) };
       for (const f of fields) if (f in input) after[f] = structuredClone(input[f]);
-      for (const f of ['strengths', 'improvements', 'feedback']) after[f] = String(after[f] ?? '');
+      for (const f of ['strengths', 'improvements', 'feedback', 'justification']) after[f] = String(after[f] ?? '');
       after.overall = after.overall ?? null;
       after.recommendation = after.recommendation || null;
+      if (Array.isArray(after.criteria)) after.criteria = after.criteria.map((c) => (c && typeof c === 'object' && typeof c.id === 'string' ? pickCriterion(c, { notes: plus }) : c));
       const { valid, errors } = validateEvaluation(after);
       if (!valid) return validation(errors);
+      if (plus) {
+        const notes = criteriaNotesError(after.criteria);
+        if (notes) return validation({ criteria: notes });
+        const why = justificationError(after);
+        if (why) return validation({ justification: why });
+      }
       const row = Object.fromEntries(fields.map((f) => [f, after[f]]));
       const q = before
         ? sb.from('staff_evaluations').update(row).eq('id', before.id)
         : sb.from('staff_evaluations').insert(row);
-      const { data, error, status } = await q.select(EVALUATION_COLUMNS).maybeSingle();
+      const { data, error, status } = await q.select(columns).maybeSingle();
       if (error) return failFrom(error, status);
       if (!data) return fail('NOT_FOUND', 'Avaliação não encontrada.');
       await loadNames();
@@ -751,6 +765,74 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
       if (g) return g;
       const { error, status } = await sb.rpc('archive_staff_evaluation', { p_id: id });
       return error ? failFrom(error, status) : ok(null);
+    },
+
+    /* ----- Plano 12: decisões da Direção, cobertura e lembretes (supabase/23_avaliacoes_decisoes.sql) ----- */
+    async listEvaluationDecisions() {
+      const { error: g } = await guard('diretoria.ver');
+      if (g) return g;
+      const { data, error, status } = await sb.from('staff_evaluation_decisions').select('*').order('decided_at', { ascending: false });
+      if (error) return failFrom(error, status);
+      await loadNames();
+      return ok(data.map((d) => ({ ...d, decided_at: new Date(d.decided_at).toISOString(), evaluated_name: nameOf(d.evaluated_id), decided_by_name: nameOf(d.decided_by) })));
+    },
+
+    async registerEvaluationDecision(input = {}) {
+      const { error: g } = await guard('diretoria.ver');
+      if (g) return g;
+      const d = {
+        evaluation_id: String(input.evaluation_id ?? ''), decision: String(input.decision ?? ''), action: String(input.action ?? ''),
+        reason: String(input.reason ?? ''),
+      };
+      // Checagem rápida dos campos (a recomendação e o alvo o banco confere).
+      const { valid, errors } = validateDecision({ recommendation: input.recommendation ?? null }, d);
+      if (!valid) return validation(errors);
+      if (hasEmoji(d.reason)) return validation({ reason: NO_EMOJI_MESSAGE });
+      const { data: id, error, status } = await sb.rpc('registrar_decisao_avaliacao', {
+        p_avaliacao: d.evaluation_id, p_decisao: d.decision, p_acao: d.action || null, p_motivo: d.reason,
+      });
+      if (error) {
+        if (error.code === 'KB404') return fail('NOT_FOUND', error.message);
+        if (error.code === 'KB422') {
+          const field = { [EVALUATION_DECISION_ERRORS.action]: 'action', [EVALUATION_DECISION_ERRORS.sameAction]: 'action', [EVALUATION_DECISION_ERRORS.reason]: 'reason', [NO_EMOJI_MESSAGE]: 'reason' }[error.message] ?? '_';
+          return validation({ [field]: error.message });
+        }
+        return failFrom(error, status);
+      }
+      const { data, error: e2, status: s2 } = await sb.from('staff_evaluation_decisions').select('*').eq('id', id).maybeSingle();
+      if (e2) return failFrom(e2, s2);
+      await loadNames();
+      return ok({ ...data, decided_at: new Date(data.decided_at).toISOString(), evaluated_name: nameOf(data.evaluated_id), decided_by_name: nameOf(data.decided_by) });
+    },
+
+    async getEvaluationCoverage(periodId) {
+      const { can, error: g } = await guard();
+      if (g) return g;
+      if (!can('avaliacoes.ler') && !can('avaliacoes.gerenciar')) return fail('FORBIDDEN', EVALUATION_DECISION_ERRORS.coverage);
+      const { data, error, status } = await sb.rpc('avaliacao_cobertura', { p_periodo: periodId });
+      if (error) return failFrom(error, status);
+      return ok((data ?? []).map((c) => ({ ...c, enviadas: Number(c.enviadas) })));
+    },
+
+    async listEvaluationReminders(periodId = '') {
+      const { can, error: g } = await guard();
+      if (g) return g;
+      if (!can('avaliacoes.ler') && !can('avaliacoes.gerenciar')) return fail('FORBIDDEN');
+      let q = sb.from('staff_evaluation_reminders').select('*').order('sent_at', { ascending: false });
+      if (periodId) q = q.eq('period_id', periodId);
+      const { data, error, status } = await q;
+      if (error) return failFrom(error, status);
+      await loadNames();
+      return ok(data.map((r) => ({ ...r, sent_at: new Date(r.sent_at).toISOString(), sent_by_name: nameOf(r.sent_by) })));
+    },
+
+    async sendEvaluationReminder({ period_id: periodId, kind, siteUrl = '' } = {}) {
+      const { error: g } = await guard('avaliacoes.gerenciar');
+      if (g) return g;
+      if (!EVALUATION_REMINDER_KINDS.includes(kind)) return validation({ _: EVALUATION_REMINDER_ERRORS.kind });
+      const res = await invokeSend({ action: 'lembrete_avaliacao', period_id: periodId, kind, site_url: siteUrl });
+      if (res.error?.message === 'Ação desconhecida.') return fail('NETWORK', EVALUATION_REMINDER_ERRORS.outdatedFunction);
+      return res;
     },
 
     /* ----- Etapa 11: avisos (supabase/09_avisos_auditoria.sql) ----- */
@@ -1991,7 +2073,7 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
 
   const seesEvaluations = (can) => can('avaliacoes.criar') || can('avaliacoes.ler') || can('avaliacoes.gerenciar');
   const presentProposal = (p) => ({ ...p, created_by_name: nameOf(p.created_by), reviewed_by_name: nameOf(p.reviewed_by) });
-  const presentEvaluation = (e) => ({ ...e, criteria: e.criteria ?? [], evaluated_name: nameOf(e.evaluated_id), evaluator_name: nameOf(e.evaluator_id) });
+  const presentEvaluation = (e) => ({ justification: '', ...e, criteria: e.criteria ?? [], evaluated_name: nameOf(e.evaluated_id), evaluator_name: nameOf(e.evaluator_id) });
 
   async function readGrid() {
     const [perms, rows] = await Promise.all([

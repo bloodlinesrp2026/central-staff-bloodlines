@@ -10,8 +10,11 @@ import {
 import {
   ALIGNMENT_ERRORS, ALLOWLIST_ERRORS, AREA_DISCORD_ERRORS, AREA_HISTORY_ACTIONS, alignmentDeadlineAt, validateAlignment, AREA_MAX_MENTIONS, DISCORD_SEND_ERRORS, MAX_PRINTS, announcementRecipients, areaRecipients,
   meetingList, meetingRecipients, validateDiscordRoleIds, normalizeName, printError, sentStatus, validateAlEvaluation, validateAlExtras, validateAreaMessage,
-  validateWebhook,
+  validateWebhook, EVALUATION_REMINDER_ERRORS, EVALUATION_REMINDER_KINDS, evaluationReminderRecipients,
 } from '../core/allowlist.js';
+import {
+  EVALUATION_DECISION_ERRORS, criteriaNotesError, decisionTargetError, justificationError, pickCriterion, resolvedAction, validateDecision,
+} from '../core/avaliacoes.js';
 import { STATUSES, validateProcedure, validateStaffMember } from '../core/validate.js';
 import {
   BLOCKED_NAME_FIELDS, CHECKLIST_FIELDS, LORE_ERRORS, QUESTION_FIELDS, photoError, pickCharacter, pickFields,
@@ -31,7 +34,7 @@ import {
 import { MEETING_STATUS_ERRORS, audienceOf, findMeetingConflict, meetingConflictMessage, participantLabel, pickMeeting, sortMeetings, validateMeeting } from '../core/agenda.js';
 import {
   PROPOSAL_ERRORS, contentChanged, proposalStatus, EVALUATION_ERRORS, evaluationChangeError, validateEvaluation,
-  isPeriodOpen, validateAnnouncement, isAnnouncementFor, PROPOSAL_NOTE_MAX,
+  isPeriodOpen, validateAnnouncement, isAnnouncementFor, PROPOSAL_NOTE_MAX, NO_EMOJI_MESSAGE, hasEmoji,
 } from '../core/workflow.js';
 import {
   CEO, PERMISSIONS, ROLE_CODES, canReadAudience, defaultGrid, permissionChangesError, permissionsOf, roleLevel, staffChangeError,
@@ -312,7 +315,7 @@ export function createMockAdapter({
   const presentProposal = (p) => ({ ...clone(p), created_by_name: nameOf(p.created_by), reviewed_by_name: p.reviewed_by ? nameOf(p.reviewed_by) : null });
   const presentEvaluation = (e) => {
     const { archived_by, archived_at, ...rest } = clone(e);
-    return { ...rest, evaluated_name: nameOf(e.evaluated_id), evaluator_name: nameOf(e.evaluator_id) };
+    return { justification: '', ...rest, evaluated_name: nameOf(e.evaluated_id), evaluator_name: nameOf(e.evaluator_id) };
   };
   function presentAnnouncement(a, staff) {
     const r = state.reads.find((x) => x.announcement_id === a.id && x.discord_id === staff.discord_id);
@@ -873,14 +876,20 @@ export function createMockAdapter({
       return run('saveEvaluation', 'avaliacoes.criar', async ({ staff }) => {
         const before = input.id ? state.evaluations.find((e) => e.id === input.id && e.evaluator_id === staff.discord_id) : null;
         if (input.id && !before) return fail('NOT_FOUND', 'Avaliação não encontrada.');
-        const fields = ['period_id', 'evaluated_id', 'status', 'criteria', 'overall', 'strengths', 'improvements', 'feedback', 'recommendation'];
-        const after = { ...(before ? clone(before) : { status: 'rascunho', criteria: [], overall: null, strengths: '', improvements: '', feedback: '', recommendation: null }) };
+        const fields = ['period_id', 'evaluated_id', 'status', 'criteria', 'overall', 'strengths', 'improvements', 'feedback', 'recommendation', 'justification'];
+        const after = { ...(before ? clone(before) : { status: 'rascunho', criteria: [], overall: null, strengths: '', improvements: '', feedback: '', recommendation: null, justification: '' }) };
         for (const f of fields) if (f in input) after[f] = clone(input[f]);
-        for (const f of ['strengths', 'improvements', 'feedback']) after[f] = String(after[f] ?? '');
+        for (const f of ['strengths', 'improvements', 'feedback', 'justification']) after[f] = String(after[f] ?? '');
         after.overall = after.overall ?? null;
         after.recommendation = after.recommendation || null;
+        // Plano 12: comentário e evidências por critério (só os campos conhecidos são guardados).
+        if (Array.isArray(after.criteria)) after.criteria = after.criteria.map((c) => (c && typeof c === 'object' && typeof c.id === 'string' ? pickCriterion(c) : c));
         const { valid, errors } = validateEvaluation(after);
         if (!valid) return validationError(errors);
+        const notes = criteriaNotesError(after.criteria);
+        if (notes) return validationError({ criteria: notes });
+        const why = justificationError(after);
+        if (why) return validationError({ justification: why });
         const target = state.staff.find((m) => m.discord_id === after.evaluated_id) ?? null;
         const blocked = evaluationChangeError(staff, before, after, {
           period: state.periods.find((x) => x.id === after.period_id) ?? null, target, others: state.evaluations, now: now().getTime(),
@@ -933,6 +942,76 @@ export function createMockAdapter({
         audit(staff, 'avaliacao', e.id, 'arquivada', null, { evaluated_id: e.evaluated_id, evaluator_id: e.evaluator_id, period_id: e.period_id });
         save();
         return ok(null);
+      });
+    },
+
+    /* ----- Plano 12: decisões da Direção, cobertura e lembretes ----- */
+    async listEvaluationDecisions() {
+      // Ao contrário da ordem de gravação antes de ordenar: no mesmo milissegundo, a mais recente vem primeiro.
+      return run('listEvaluationDecisions', 'diretoria.ver', async ({ staff }) => ok([...(state.evalDecisions ?? [])].reverse()
+        .filter((d) => d.evaluated_id !== staff.discord_id)
+        .sort((a, b) => b.decided_at.localeCompare(a.decided_at))
+        .map((d) => ({ ...clone(d), evaluated_name: nameOf(d.evaluated_id), decided_by_name: nameOf(d.decided_by) }))));
+    },
+
+    async registerEvaluationDecision(input = {}) {
+      return run('registerEvaluationDecision', 'diretoria.ver', async ({ staff }) => {
+        const ev = state.evaluations.find((e) => e.id === input.evaluation_id && e.status !== 'rascunho' && e.evaluated_id !== staff.discord_id);
+        if (!ev) return fail('NOT_FOUND', EVALUATION_DECISION_ERRORS.notFound);
+        const blocked = decisionTargetError(staff, state.staff.find((m) => m.discord_id === ev.evaluated_id) ?? null);
+        if (blocked) return validationError({ _: blocked });
+        const d = { decision: String(input.decision ?? ''), action: String(input.action ?? ''), reason: String(input.reason ?? '') };
+        const { valid, errors } = validateDecision(ev, d);
+        if (!valid) return validationError(errors);
+        if (hasEmoji(d.reason)) return validationError({ reason: NO_EMOJI_MESSAGE });
+        const row = {
+          id: uuid(), evaluation_id: ev.id, evaluated_id: ev.evaluated_id, recommendation: ev.recommendation, decision: d.decision,
+          action: resolvedAction(ev, d.decision, d.action), reason: d.reason.trim(), decided_by: staff.discord_id, decided_at: nowIso(),
+        };
+        (state.evalDecisions ??= []).push(row);
+        save();
+        return ok({ ...clone(row), evaluated_name: nameOf(row.evaluated_id), decided_by_name: nameOf(row.decided_by) });
+      });
+    },
+
+    async getEvaluationCoverage(periodId) {
+      return run('getEvaluationCoverage', 'staff', async ({ can }) => {
+        if (!can('avaliacoes.ler') && !can('avaliacoes.gerenciar')) return fail('FORBIDDEN', EVALUATION_DECISION_ERRORS.coverage);
+        return ok(state.staff
+          .filter((m) => m.active && roleLevel(m.role) < 6 && permsOf(m).includes('avaliacoes.criar'))
+          .sort(byStaffName)
+          .map((m) => ({
+            discord_id: m.discord_id, display_name: m.display_name, role: m.role,
+            enviadas: state.evaluations.filter((e) => e.period_id === periodId && e.evaluator_id === m.discord_id && e.status !== 'rascunho').length,
+          })));
+      });
+    },
+
+    async listEvaluationReminders(periodId = '') {
+      return run('listEvaluationReminders', 'staff', async ({ can }) => {
+        if (!can('avaliacoes.ler') && !can('avaliacoes.gerenciar')) return fail('FORBIDDEN');
+        return ok((state.evalReminders ?? []).filter((r) => !periodId || r.period_id === periodId)
+          .sort((a, b) => b.sent_at.localeCompare(a.sent_at))
+          .map((r) => ({ ...clone(r), sent_by_name: nameOf(r.sent_by) })));
+      });
+    },
+
+    /* Simula a ação 'lembrete_avaliacao' da Edge Function: mesmas travas, nada vai ao Discord de verdade; grava o registro. */
+    async sendEvaluationReminder({ period_id: periodId, kind } = {}) {
+      return run('sendEvaluationReminder', 'avaliacoes.gerenciar', async ({ staff }) => {
+        if (!EVALUATION_REMINDER_KINDS.includes(kind)) return validationError({ _: EVALUATION_REMINDER_ERRORS.kind });
+        const period = state.periods.find((p) => p.id === periodId);
+        if (!period) return fail('NOT_FOUND', EVALUATION_REMINDER_ERRORS.period);
+        if (new Date(period.ends_at).getTime() <= now().getTime()) return validationError({ _: EVALUATION_REMINDER_ERRORS.closed });
+        const coverage = await adapter.getEvaluationCoverage(periodId);
+        if (coverage.error) return coverage;
+        const recipients = evaluationReminderRecipients(coverage.data, kind);
+        if (!recipients.length) return validationError({ _: EVALUATION_REMINDER_ERRORS.noRecipients });
+        const at = nowIso();
+        const row = { id: uuid(), period_id: periodId, kind, sent: recipients.length, failed: [], sent_by: staff.discord_id, sent_at: at };
+        (state.evalReminders ??= []).push(row);
+        save();
+        return ok({ sent_at: at, dm: { sent: recipients.length, failed: [] }, registrado: true });
       });
     },
 

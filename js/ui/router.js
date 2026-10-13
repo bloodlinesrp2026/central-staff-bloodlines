@@ -41,15 +41,16 @@ const ROUTES = [
   // Perfil da staff
   ['perfil', /^#\/perfil(?:\/([0-9]{17,20}))?$/],
   // Painel da Diretoria
-  ['diretoria', /^#\/diretoria(?:\/(equipe|avaliacoes|produtividade|ocorrencias|cargos|alinhamentos))?$/],
+  // Plano 12: #/diretoria/decisoes/<discord_id> abre a ficha de decisão daquele membro.
+  ['diretoria', /^#\/diretoria(?:\/(equipe|avaliacoes|decisoes|produtividade|ocorrencias|cargos|alinhamentos))?(?:\/([0-9]{17,20}))?$/],
 ];
 
-/** @returns {{ name: string, slug?: string, hash: string }} */
+/** @returns {{ name: string, slug?: string, id?: string, hash: string }} */
 export function parseRoute(hash) {
   const value = hash || '#/';
   for (const [name, re] of ROUTES) {
     const m = value.match(re);
-    if (m) return { name, slug: m[1], hash: value };
+    if (m) return m[2] ? { name, slug: m[1], id: m[2], hash: value } : { name, slug: m[1], hash: value };
   }
   return { name: 'notfound', hash: value };
 }

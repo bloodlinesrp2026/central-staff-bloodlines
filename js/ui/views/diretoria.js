@@ -3,6 +3,10 @@
 // Plano 11 (SQL 22): #/diretoria/<aba>. Quem tem só diretoria.avaliacoes (padrão: Head Staff) abre só a aba Avaliações
 // (médias por área e as avaliações do Head Staff); quem tem alinhamento.chamar vê a aba Alinhamentos. Cada aba só aparece
 // com a permissão dela, e o banco confere de novo (RLS e funções).
+// Plano 12: aba Decisões (#/diretoria/decisoes e #/diretoria/decisoes/<discord_id>): recomendações do Head Staff que esperam
+// a Direção, cobertura do período e a ficha de decisão de cada membro (avaliações do Head Staff de 1 a 5 e da Diretoria de
+// 0 a 10 lado a lado, sem converter uma na outra; ocorrências, produtividade, cargos e as decisões registradas). Registrar a
+// decisão (SQL 23) abre a ação já preenchida (cargo, ocorrência ou alinhamento), sempre com confirmação.
 // Tudo passa pelo adapter; a segurança de verdade é a RLS do 21_diretoria.sql. Texto do banco sempre via h()
 // (nó de texto); o Markdown das regras de promoção passa por render-md.js. Gráficos em SVG próprio (como a tela
 // de Produtividade): cada desenho é refeito do zero ao trocar de aba, então não sobra instância antiga.
@@ -21,8 +25,13 @@ import {
 import { formField } from './gabarito.js';
 import { mountTeamEvaluations } from './evaluations.js';
 import { ALIGNMENT_DEADLINES, ALIGNMENT_MESSAGE_MAX, alignmentDeadline } from '../../core/allowlist.js';
+import { isPeriodOpen, recommendationLabel, RECOMMENDATIONS, stars } from '../../core/workflow.js';
+import {
+  DECISIONS, DECISION_REASON, criterionEvolution, criterionTrend, decisionFollowUp, decisionLabel, decisionTargetError, followUpText,
+  latestDecisions, pendingDecisions, periodCoverage, resolvedAction, validateDecision,
+} from '../../core/avaliacoes.js';
 
-const TABS = Object.freeze([['equipe', 'Equipe'], ['avaliacoes', 'Avaliações'], ['produtividade', 'Produtividade'], ['ocorrencias', 'Ocorrências'], ['cargos', 'Cargos'], ['alinhamentos', 'Alinhamentos']]);
+const TABS = Object.freeze([['equipe', 'Equipe'], ['avaliacoes', 'Avaliações'], ['decisoes', 'Decisões'], ['produtividade', 'Produtividade'], ['ocorrencias', 'Ocorrências'], ['cargos', 'Cargos'], ['alinhamentos', 'Alinhamentos']]);
 const ALIGN_PAGE = 20;
 const CACHE_MS = 5 * 60_000;
 const HISTORY_PAGE = 25;
@@ -158,7 +167,7 @@ function donutChart(parts) {
 
 /* ------------------------------------------------------------------ tela */
 
-export function renderDiretoria(app, slug = null) {
+export function renderDiretoria(app, slug = null, memberId = null) {
   if (!app.feature('diretoria')) {
     restricted(app, 'Painel indisponível', 'O Painel da Diretoria ainda não foi instalado no banco de dados.');
     return null;
@@ -171,7 +180,11 @@ export function renderDiretoria(app, slug = null) {
     align: app.feature('alinhamento') && app.can('alinhamento.chamar'),
   };
   access.evals = access.full || (access.areas && app.can('diretoria.avaliacoes'));
-  const visibleTabs = TABS.filter(([key]) => (key === 'avaliacoes' ? access.evals : key === 'alinhamentos' ? access.align : access.full));
+  // Plano 12: a aba Decisões lê as avaliações do Head Staff (avaliacoes.ler); registrar a decisão exige o SQL 23.
+  access.decisions = access.full && app.feature('avaliacoes') && app.can('avaliacoes.ler');
+  access.decide = access.decisions && app.feature('avaliacoes_decisoes');
+  const visibleTabs = TABS.filter(([key]) => (key === 'avaliacoes' ? access.evals : key === 'alinhamentos' ? access.align
+    : key === 'decisoes' ? access.decisions : access.full));
   if (!visibleTabs.length) {
     restricted(app, 'Acesso restrito', 'O Painel da Diretoria é exclusivo de Resp. Equipe, Administrador e CEO.');
     return null;
@@ -184,7 +197,8 @@ export function renderDiretoria(app, slug = null) {
     tab: visibleTabs.some(([key]) => key === slug) ? slug : visibleTabs[0][0], members: [], membersAt: 0, evaluations: [], occurrences: [], roleHistory: [], grid: null, rules: null,
     team: { q: '', role: '', area: '', status: 'ativos', sort: 'cargo', dir: -1 },
     evals: { days: '90', avaliador: '', member: '', view: '', areaDays: '90' },
-    align: { page: 0 },
+    align: { page: 0, preset: null },
+    dec: { member: memberId ?? '', data: null },
     prod: { days: '56', role: '', area: '', rows: null, key: '' },
     occ: { tipo: '', membro: '', days: '0' },
     hist: { member: '', page: 0, data: null },
@@ -308,7 +322,7 @@ export function renderDiretoria(app, slug = null) {
   function drawPanel() {
     stopTeamEvaluations();
     ({
-      equipe: drawTeam, avaliacoes: drawEvaluations, produtividade: drawProductivity, ocorrencias: drawOccurrences, cargos: drawRoles,
+      equipe: drawTeam, avaliacoes: drawEvaluations, decisoes: drawDecisions, produtividade: drawProductivity, ocorrencias: drawOccurrences, cargos: drawRoles,
       alinhamentos: drawAlignments,
     })[ctx.tab]();
   }
@@ -515,6 +529,224 @@ export function renderDiretoria(app, slug = null) {
             h('td', {}, fmt(scoreAverage(e))),
             h('td', {}, e.visivel_avaliado ? '✓ Sim' : '✗ Não'),
             h('td', {}, formatDate(e.criado_em, { time: true })))), 'Nenhuma avaliação no período.')));
+  }
+
+  /* ================================================================ Decisões (plano 12) */
+  const canManage = (m) => app.can('equipe.gerenciar') && m.discord_id !== me.discord_id && canManageRole(me.role, m.role) && assignableRoles(me.role).length > 1;
+  const nextRole = (role) => ROLE_LIST.find((r) => r.level === roleLevel(role) + 1)?.code ?? null;
+  const daysSince = (iso) => (iso ? Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 86400_000)) : null);
+  let decToken = 0;
+
+  async function loadDecisionData(force = false) {
+    if (ctx.dec.data && !force) return true;
+    const token = ++decToken;
+    const to = new Date(Date.now() + 86400_000);
+    const [periods, evals, decs, act] = await Promise.all([
+      app.adapter.listEvaluationPeriods(), app.adapter.listEvaluations(),
+      access.decide ? app.adapter.listEvaluationDecisions() : Promise.resolve({ data: [], error: null }),
+      app.adapter.getDiretoriaActivity({ from: new Date(to.getTime() - 57 * 86400_000).toISOString(), to: to.toISOString() }),
+    ]);
+    if (!alive || token !== decToken) return false;
+    if (failed(periods, 'Não foi possível carregar os períodos.') || failed(evals, 'Não foi possível carregar as avaliações.')) return false;
+    const current = periods.data.find((x) => isPeriodOpen(x)) ?? null;
+    const cov = current && access.decide ? await app.adapter.getEvaluationCoverage(current.id) : null;
+    if (!alive || token !== decToken) return false;
+    ctx.dec.data = {
+      periods: periods.data, current, coverage: cov && !cov.error ? cov.data : null,
+      evaluations: evals.data.filter((e) => e.status !== 'rascunho' && e.evaluated_id !== me.discord_id),
+      decisions: decs.error ? [] : decs.data, activity: act.error ? [] : act.data,
+    };
+    return true;
+  }
+
+  async function drawDecisions() {
+    if (!ctx.dec.data) {
+      panel.replaceChildren(h('p', { class: 'panel-text' }, 'Carregando…'));
+      if (!(await loadDecisionData()) || ctx.tab !== 'decisoes') return;
+    }
+    const d = ctx.dec.data;
+    const pending = access.decide ? pendingDecisions(d.evaluations, d.decisions) : [];
+    const cov = d.current ? periodCoverage({ period: d.current, evaluations: d.evaluations, staff: ctx.members, evaluators: d.coverage ?? [] }) : null;
+    const evaluated = [...new Set(d.evaluations.map((e) => e.evaluated_id))];
+    const people = ctx.members.filter((m) => evaluated.includes(m.discord_id) || (m.active && canTarget(me, m)))
+      .sort((a, b) => a.display_name.localeCompare(b.display_name, 'pt-BR'));
+    if (ctx.dec.member && !people.some((m) => m.discord_id === ctx.dec.member)) ctx.dec.member = '';
+    const sheet = h('div', { id: 'dir-dec-sheet' });
+    const kpi = (key, value, label) => h('div', { class: 'dir-kpi', dataset: { kpi: key } }, h('span', { class: 'dir-kpi-value' }, value), h('span', { class: 'dir-kpi-label' }, label));
+    panel.replaceChildren(...[
+      h('section', { class: 'dir-kpis dir-dec-kpis', id: 'dir-dec-kpis', 'aria-label': 'Indicadores das avaliações' },
+        kpi('periodo', d.current ? cov.timeLeft : 'sem período', d.current ? `para fechar "${d.current.title}"` : 'nenhum período aberto'),
+        kpi('avaliados', cov ? `${cov.evaluated} de ${cov.total}` : '–', 'avaliados no período'),
+        kpi('parados', d.coverage ? String(cov.idleEvaluators.length) : '–', 'avaliadores sem enviar'),
+        kpi('aguardando', access.decide ? String(pending.length) : '–', 'recomendações aguardando decisão')),
+      !access.decide && h('p', { class: 'banner banner--info' }, icon('info-circle'),
+        h('span', {}, 'Para registrar decisões, falta rodar o SQL 23 no banco. Por enquanto a ficha só mostra os dados.')),
+      access.decide && section('dir-dec-pending-title', 'Aguardando decisão da Direção', 'gavel',
+        pending.length
+          ? h('ul', { class: 'dir-pending', id: 'dir-dec-pending' }, pending.map((e) => h('li', {},
+            h('button', { type: 'button', class: 'dir-pending-btn', dataset: { member: e.evaluated_id }, onclick: () => { ctx.dec.member = e.evaluated_id; drawDecisions(); document.getElementById('dir-dec-sheet')?.scrollIntoView?.({ block: 'start' }); } },
+              h('span', { class: `badge ${['advertencia', 'desligamento'].includes(e.recommendation) ? 'dir-badge-warn' : 'badge--status'}` }, recommendationLabel(e.recommendation)),
+              e.evaluated_name ?? nameOf(e.evaluated_id), h('span', { class: 'dir-muted' }, ` · por ${e.evaluator_name ?? nameOf(e.evaluator_id)}, ${formatDate(e.submitted_at)}`)))))
+          : h('p', { class: 'panel-text' }, '✓ Nenhuma recomendação esperando decisão.')),
+      section('dir-dec-sheet-title', 'Ficha de decisão', 'id-badge-2',
+        h('div', { class: 'staff-filters dir-filters' }, filter('Membro', h('select', {
+          class: 'input input--sm', id: 'dir-dec-member', onchange: (e) => { ctx.dec.member = e.target.value; drawSheet(sheet); },
+        }, options([['', 'Escolha um membro'], ...people.map((m) => [m.discord_id, `${m.display_name} (${roleLabel(m.role)})`])], ctx.dec.member)))),
+        sheet)].filter(Boolean));
+    drawSheet(sheet);
+    app.applyOnline?.();
+  }
+
+  function drawSheet(box) {
+    const d = ctx.dec.data;
+    const m = memberOf(ctx.dec.member);
+    if (!m) { box.replaceChildren(h('p', { class: 'panel-text' }, 'Escolha um membro para ver tudo sobre ele num lugar só.')); return; }
+    const head = d.evaluations.filter((e) => e.evaluated_id === m.discord_id)
+      .sort((a, b) => String(b.submitted_at).localeCompare(String(a.submitted_at)));
+    const last = latestDecisions(d.decisions);
+    const periodName = (id) => d.periods.find((x) => x.id === id)?.title ?? '';
+    const director = ctx.evaluations.filter((e) => e.avaliado_id === m.discord_id).slice(0, 6);
+    const occ = ctx.occurrences.filter((o) => o.membro_id === m.discord_id).slice(0, 6);
+    const roles = ctx.roleHistory.filter((x) => x.membro_id === m.discord_id).slice(0, 6);
+    const decs = d.decisions.filter((x) => x.evaluated_id === m.discord_id);
+    const acts = d.activity.filter((r) => r.discord_id === m.discord_id);
+    const byType = ACTIVITY_TYPES.map((t) => ({ label: t.label, n: acts.filter((r) => r.tipo === t.code).reduce((a, r) => a + r.total, 0) })).filter((x) => x.n);
+    const evo = criterionEvolution(d.evaluations, d.periods, m.discord_id);
+    const days = daysSince(m.cargo_desde);
+    const target = canTarget(me, m);
+    const btn = (id, ico, label, onclick) => h('button', { type: 'button', class: 'btn btn--sm', id, onclick }, icon(ico), label);
+    const arrow = (t) => ({ sobe: h('span', { class: 'dir-up' }, '↑'), cai: h('span', { class: 'dir-down' }, '↓'), igual: h('span', { class: 'dir-muted' }, '=') })[t] ?? h('span', { class: 'dir-muted' }, '–');
+
+    box.replaceChildren(...[
+      h('div', { class: 'dir-dec-who', id: 'dir-dec-who' },
+        miniAvatar(m),
+        h('div', {},
+          h('p', { class: 'dir-dec-name' }, profileLink(m.discord_id, m.display_name), ' ', roleBadge(m.role), !m.active && h('span', { class: 'badge badge--revisar dir-inline-badge' }, 'Inativo')),
+          h('p', { class: 'dir-muted' }, m.cargo_desde ? `No cargo desde ${formatDate(m.cargo_desde)} (${days} ${days === 1 ? 'dia' : 'dias'})` : 'Sem data de entrada no cargo',
+            m.areas.length ? ` · Áreas: ${m.areas.map((a) => a.nome).join(', ')}` : ' · Sem área'))),
+      h('div', { class: 'dir-dec-actions', id: 'dir-dec-actions' },
+        target && btn('dir-dec-avaliar', 'star', 'Avaliar (Diretoria)', () => evaluationDialog(m.discord_id)),
+        target && btn('dir-dec-ocorrencia', 'alert-triangle', 'Registrar ocorrência', () => occurrenceDialog(m.discord_id)),
+        canManage(m) && m.active && btn('dir-dec-cargo', 'arrows-up-down', 'Alterar cargo', () => roleDialog(m)),
+        access.align && m.active && btn('dir-dec-alinhar', 'message-circle', 'Chamar para alinhamento', () => openAlignment(m, ''))),
+      h('h3', { class: 'dir-dec-sub' }, 'Avaliações do Head Staff (notas de 1 a 5)'),
+      head.length
+        ? h('div', { class: 'dir-dec-cards', id: 'dir-dec-head' }, head.map((e) => {
+          const dec = last.get(e.id);
+          return h('article', { class: 'dir-dec-card', dataset: { evaluation: e.id } },
+            h('p', { class: 'dir-dec-card-head' }, h('strong', {}, periodName(e.period_id) || 'Período'),
+              h('span', { class: 'dir-muted' }, ` · por ${e.evaluator_name ?? nameOf(e.evaluator_id)}`), e.status === 'arquivada' && h('span', { class: 'dir-muted' }, ' · arquivada')),
+            h('p', {}, h('span', { class: 'stars', 'aria-label': `Nota geral ${e.overall} de 5` }, stars(e.overall)), ' ',
+              h('span', { class: `badge ${['advertencia', 'desligamento'].includes(e.recommendation) ? 'dir-badge-warn' : 'badge--status'}` }, recommendationLabel(e.recommendation) || 'Sem recomendação')),
+            h('ul', { class: 'plain-list dir-dec-crit' }, (e.criteria ?? []).map((c) => h('li', {}, h('span', {}, c.label),
+              h('span', { class: 'stars', 'aria-label': `${c.score ?? 'sem nota'} de 5` }, stars(c.score))))),
+            e.justification && h('p', { class: 'dir-dec-just' }, h('strong', {}, 'Justificativa: '), e.justification),
+            h('p', { class: 'dir-dec-status' }, dec ? `Direção: ${decisionLabel(dec.decision)}${dec.action ? ` (${recommendationLabel(dec.action)})` : ''} · ${dec.decided_by_name ?? nameOf(dec.decided_by)}, ${formatDate(dec.decided_at)}` : 'Aguardando decisão da Direção'),
+            h('div', { class: 'dir-dec-card-actions' },
+              h('a', { class: 'btn btn--sm btn--ghost', href: `#/avaliacoes-equipe/${e.id}` }, 'Ler tudo'),
+              access.decide && e.recommendation && !decisionTargetError(me, m) && h('button', {
+                type: 'button', class: 'btn btn--sm btn--primary', dataset: { action: 'decidir' }, 'data-requires-online': '', onclick: () => decisionDialog(e, m),
+              }, icon('gavel'), dec && dec.decision !== 'adiada' ? 'Nova decisão' : 'Registrar decisão')));
+        }))
+        : h('p', { class: 'panel-text' }, 'Nenhuma avaliação do Head Staff sobre este membro.'),
+      evo.periods.length > 1 && h('div', { class: 'dir-grid-2' },
+        section('dir-dec-evo-title', 'Evolução da nota geral (Head Staff, 1 a 5)', 'chart-line',
+          lineChart(evo.periods.map((x, i) => ({ label: x.title.slice(0, 12), value: evo.overall[i] ?? 0 })), { label: `Nota geral de ${m.display_name} por período`, max: 5 })),
+        section('dir-dec-crit-title', 'Evolução por critério', 'list-details',
+          table('dir-dec-crit-table', 'Média de cada critério por período',
+            ['Critério', ...evo.periods.map((x) => x.title), 'Tendência'].map((t) => h('th', { scope: 'col' }, t)),
+            evo.series.map((x) => h('tr', {}, h('td', {}, x.label), ...x.values.map((v) => h('td', {}, v == null ? '–' : fmt(v))), h('td', {}, arrow(criterionTrend(x.values)))))))),
+      h('div', { class: 'dir-grid-2' },
+        section('dir-dec-dir-title', 'Avaliações da Diretoria (notas de 0 a 10)', 'star',
+          director.length
+            ? h('ul', { class: 'plain-list dir-dec-list' }, director.map((e) => h('li', {}, scoreBar(e.nota_geral),
+              h('span', { class: 'dir-muted' }, ` ${dateOnly(e.periodo_inicio)} a ${dateOnly(e.periodo_fim)} · ${e.avaliador_nome ?? nameOf(e.avaliador_id)}`))))
+            : h('p', { class: 'panel-text' }, 'Nenhuma avaliação da Diretoria.')),
+        section('dir-dec-prod-title', 'Produtividade (últimas 8 semanas)', 'chart-bar',
+          byType.length
+            ? h('ul', { class: 'plain-list dir-dec-list' }, byType.map((x) => h('li', {}, `${x.label}: ${x.n}`)))
+            : h('p', { class: 'panel-text' }, 'Nenhuma atividade registrada no período.'))),
+      h('div', { class: 'dir-grid-2' },
+        section('dir-dec-occ-title', 'Ocorrências', 'alert-triangle',
+          occ.length
+            ? h('ul', { class: 'plain-list dir-dec-list' }, occ.map((o) => h('li', {}, h('strong', {}, occurrenceLabel(o.tipo)), ` · ${formatDate(o.feito_em)} · `, o.descricao)))
+            : h('p', { class: 'panel-text' }, 'Nenhuma ocorrência.')),
+        section('dir-dec-roles-title', 'Histórico de cargos', 'history',
+          roles.length
+            ? h('ul', { class: 'plain-list dir-dec-list' }, roles.map((x) => h('li', {}, roleBadge(x.cargo_anterior), ' › ', roleBadge(x.cargo_novo),
+              h('span', { class: 'dir-muted' }, ` ${formatDate(x.feito_em)}${x.motivo ? ` · ${x.motivo}` : ''}`))))
+            : h('p', { class: 'panel-text' }, 'Nenhuma troca de cargo registrada.'))),
+      access.decide && section('dir-dec-hist-title', 'Decisões registradas', 'gavel',
+        decs.length
+          ? h('ol', { class: 'plain-list dir-dec-list', id: 'dir-dec-history' }, decs.map((x) => h('li', {},
+            h('strong', {}, decisionLabel(x.decision)), x.action ? ` · ${recommendationLabel(x.action)}` : '',
+            h('span', { class: 'dir-muted' }, ` · recomendação: ${recommendationLabel(x.recommendation) || '–'} · ${x.decided_by_name ?? nameOf(x.decided_by)}, ${formatDate(x.decided_at, { time: true })}`),
+            h('p', { class: 'dir-comment' }, x.reason))))
+          : h('p', { class: 'panel-text' }, 'Nenhuma decisão registrada sobre este membro.')),
+    ].filter(Boolean));
+    app.applyOnline?.();
+  }
+
+  function openAlignment(m, text) {
+    ctx.align.preset = { membro_id: m.discord_id, mensagem: text };
+    ctx.tab = 'alinhamentos';
+    drawTabs();
+    drawPanel();
+  }
+
+  /** Registra a decisão sobre uma avaliação do Head Staff e oferece a ação já preenchida (Decisão 3: nada automático). */
+  async function decisionDialog(e, m) {
+    const radios = h('div', { class: 'dir-al-deadlines', role: 'radiogroup', 'aria-labelledby': 'dir-dec-kind-label' },
+      DECISIONS.map((x) => h('label', { class: 'dir-al-deadline' },
+        h('input', { type: 'radio', name: 'dir-dec-kind', id: `dir-dec-kind-${x.code}`, value: x.code, checked: x.code === 'acatada' }), ' ', x.label)));
+    const kindError = h('p', { class: 'field-error', hidden: true });
+    const action = formField('dir-dec-action', 'O que a Direção decidiu fazer', h('select', { class: 'input' },
+      options([['', 'Escolha'], ...RECOMMENDATIONS.filter((x) => x.code !== e.recommendation).map((x) => [x.code, x.label])], '')));
+    const reason = formField('dir-dec-reason', 'Motivo', h('textarea', { class: 'input textarea', rows: 4, maxlength: DECISION_REASON.max }),
+      `De ${DECISION_REASON.min} a ${DECISION_REASON.max} caracteres. Fica no histórico; o membro não vê.`);
+    const general = h('p', { class: 'field-error', role: 'alert', hidden: true });
+    const kind = () => radios.querySelector('input:checked')?.value ?? '';
+    const sync = () => { action.el.hidden = kind() !== 'outra'; };
+    radios.addEventListener('change', sync);
+    sync();
+    const body = h('form', { class: 'dir-form', id: 'dir-dec-form', novalidate: true, onsubmit: (ev) => ev.preventDefault() },
+      h('p', {}, `Recomendação do Head Staff para ${m.display_name}: `, h('strong', {}, recommendationLabel(e.recommendation)), '.'),
+      h('div', { class: 'field' }, h('span', { class: 'field-label', id: 'dir-dec-kind-label' }, 'Decisão'), radios, kindError),
+      action.el, reason.el, general);
+    const draft = attachFormDraft(app, `diretoria:decisao:${e.id}`, body, { bannerId: 'dir-dec-draft' });
+    drafts.add(draft);
+    const fields = { decision: { error: kindError }, action, reason };
+    const input = () => ({ evaluation_id: e.id, recommendation: e.recommendation, decision: kind(), action: action.input.value, reason: reason.input.value });
+    let saved = null;
+    const done = await formDialog({
+      title: 'Registrar decisão', body, confirmLabel: 'Registrar decisão', draft,
+      validate: () => showErrors(fields, general, validateDecision(e, input()).errors),
+      submit: async () => {
+        const r = await app.adapter.registerEvaluationDecision(input());
+        if (r.error) { showErrors(fields, general, r.error.details?.errors ?? { _: errorText(r.error) }); return r.error; }
+        saved = r.data;
+        return null;
+      },
+    });
+    if (!done || !saved) return;
+    toast(`Decisão registrada: ${decisionLabel(saved.decision)}.`);
+    ctx.dec.data.decisions = [saved, ...ctx.dec.data.decisions];
+    drawDecisions();
+    // Decisão 3 do plano 12: a ação abre já preenchida, sempre com confirmação.
+    const next = decisionFollowUp(resolvedAction(e, saved.decision, saved.action));
+    if (!next) return;
+    const allowed = next.kind === 'cargo' ? canManage(m) && m.active : next.kind === 'alinhamento' ? access.align && m.active : canTarget(me, m);
+    if (!allowed) { toast(`Para ${next.label.toLowerCase()}, peça a quem tem a permissão.`, 4500); return; }
+    const go = await openDialog({
+      title: `${next.label} agora?`,
+      body: h('p', {}, `A decisão foi registrada. Quer abrir "${next.label}" para ${m.display_name} com os dados já preenchidos? Nada é feito sem você confirmar na próxima janela.`),
+      actions: [{ label: 'Depois', value: false, variant: 'ghost' }, { label: next.label, value: true, variant: 'primary', autofocus: true }],
+    });
+    if (!go || !alive) return;
+    const text = followUpText(e, saved.reason);
+    if (next.kind === 'cargo') await roleDialog(m, { role: nextRole(m.role), motivo: text });
+    else if (next.kind === 'ocorrencia') await occurrenceDialog(m.discord_id, { tipo: next.tipo, descricao: text });
+    else openAlignment(m, text);
   }
 
   /* ================================================================ Produtividade */
@@ -759,6 +991,14 @@ export function renderDiretoria(app, slug = null) {
       message.el, counter,
       h('div', { class: 'dir-form-row' }, channel.el, call.el),
       when && when.el, general, h('div', { class: 'panel-actions' }, send), result);
+    // Plano 12: vindo da ficha de decisão ("acompanhar"), a pessoa e a mensagem já chegam preenchidas.
+    if (f.preset) {
+      if (choices.some(([v]) => v === f.preset.membro_id)) member.input.value = f.preset.membro_id;
+      else manual.input.value = f.preset.membro_id;
+      message.input.value = f.preset.mensagem.slice(0, ALIGNMENT_MESSAGE_MAX);
+      paint();
+      f.preset = null;
+    }
     const draft = attachFormDraft(app, 'diretoria:alinhamento', form, { bannerId: 'dir-al-draft', hasContent: (v) => Boolean(String(v['dir-al-msg'] ?? '').trim()) });
     drafts.add(draft);
 
@@ -946,10 +1186,10 @@ export function renderDiretoria(app, slug = null) {
     }
   }
 
-  async function occurrenceDialog(preset) {
+  async function occurrenceDialog(preset, suggested = {}) {
     const who = formField('dir-oc-member', 'Membro', memberSelect('dir-oc-member', preset));
-    const type = formField('dir-oc-tipo', 'Tipo', h('select', { class: 'input' }, options([['', 'Escolha o tipo'], ...OCCURRENCE_TYPES.map((t) => [t.code, t.label])], '')));
-    const text = formField('dir-oc-text', 'Descrição', h('textarea', { class: 'input textarea', rows: 4, maxlength: DIRETORIA_LIMITS.occurrence }),
+    const type = formField('dir-oc-tipo', 'Tipo', h('select', { class: 'input' }, options([['', 'Escolha o tipo'], ...OCCURRENCE_TYPES.map((t) => [t.code, t.label])], suggested.tipo ?? '')));
+    const text = formField('dir-oc-text', 'Descrição', h('textarea', { class: 'input textarea', rows: 4, maxlength: DIRETORIA_LIMITS.occurrence }, suggested.descricao ?? ''),
       'Só a Diretoria vê. O membro não é avisado.');
     const general = h('p', { class: 'field-error', role: 'alert', hidden: true });
     const body = h('form', { class: 'dir-form', id: 'dir-oc-form', novalidate: true, onsubmit: (e) => e.preventDefault() }, who.el, type.el, text.el, general);
@@ -972,13 +1212,15 @@ export function renderDiretoria(app, slug = null) {
       toast(`${occurrenceLabel(saved.tipo)} registrada para ${nameOf(saved.membro_id)}.`);
       await refresh({ members: true, occurrences: true });
     }
+    return Boolean(done && saved);
   }
 
-  async function roleDialog(m) {
+  async function roleDialog(m, suggested = {}) {
     const roles = assignableRoles(me.role).filter((r) => r !== m.role);
     const role = formField('dir-role-new', 'Novo cargo', h('select', { class: 'input' },
-      options([...roles].reverse().map((r) => [r, `${roleLabel(r)}${roleLevel(r) > roleLevel(m.role) ? ' (promoção)' : ' (rebaixamento)'}`]), roles.at(-1))));
-    const reason = formField('dir-role-reason', 'Motivo', h('textarea', { class: 'input textarea', rows: 3, maxlength: DIRETORIA_LIMITS.reason }),
+      options([...roles].reverse().map((r) => [r, `${roleLabel(r)}${roleLevel(r) > roleLevel(m.role) ? ' (promoção)' : ' (rebaixamento)'}`]),
+        roles.includes(suggested.role) ? suggested.role : roles.at(-1))));
+    const reason = formField('dir-role-reason', 'Motivo', h('textarea', { class: 'input textarea', rows: 3, maxlength: DIRETORIA_LIMITS.reason }, (suggested.motivo ?? '').slice(0, DIRETORIA_LIMITS.reason)),
       'Opcional. Fica no histórico de cargos.');
     const general = h('p', { class: 'field-error', role: 'alert', hidden: true });
     const body = h('form', { class: 'dir-form', id: 'dir-role-form', novalidate: true, onsubmit: (e) => e.preventDefault() },
@@ -995,13 +1237,14 @@ export function renderDiretoria(app, slug = null) {
         return null;
       },
     });
-    if (!done || !saved) return;
+    if (!done || !saved) return false;
     // Atualiza a linha na hora (sem recarregar a página) e depois relê tudo do banco.
     Object.assign(m, { role: saved.role, cargo_desde: new Date().toISOString() });
     ctx.membersAt = 0;
     if (ctx.tab === 'equipe') drawPanel();
     toast(`${m.display_name} agora é ${roleLabel(saved.role)}.`);
     await refresh({ members: true, history: true });
+    return true;
   }
 
   load();

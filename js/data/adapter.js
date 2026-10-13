@@ -393,6 +393,24 @@
  * @property {(f?: { limit?: number, offset?: number }) => Result<{ items: object[], total: number }>} listAlignments    alinhamento.chamar.
  *           Alinhamentos chamados, mais recentes primeiro, com chamado_por_nome.
  *
+ * Plano 12 (23_avaliacoes_decisoes.sql; feature "avaliacoes_decisoes"; regras em js/core/avaliacoes.js).
+ *           saveEvaluation também aceita justification (obrigatória com 100+ caracteres ao enviar advertência ou desligamento) e, em
+ *           cada critério, comment (até 500) e evidence (até 5 links https). Sem a feature, os três são ignorados.
+ *           listEvaluations devolve justification ('' sem a feature).
+ * @property {() => Result<object[]>} listEvaluationDecisions    diretoria.ver. Decisões da Direção sobre as avaliações do Head Staff, mais
+ *           recentes primeiro: { id, evaluation_id, evaluated_id, evaluated_name, recommendation, decision, action, reason, decided_by,
+ *           decided_by_name, decided_at }. Nunca as sobre a própria pessoa.
+ * @property {(d: { evaluation_id: string, decision: string, action?: string, reason: string }) => Result<object>} registerEvaluationDecision
+ *           diretoria.ver. Acatada = a recomendação; outra = action diferente da recomendação; adiada = sem ação. Motivo de 10 a 1000.
+ *           Só sobre membro ativo de cargo abaixo (CEO: todos), nunca sobre si. VALIDATION por campo (EVALUATION_DECISION_ERRORS).
+ * @property {(periodId: string) => Result<object[]>} getEvaluationCoverage    avaliacoes.ler ou avaliacoes.gerenciar. Quem avalia (ativos
+ *           abaixo da Direção com avaliacoes.criar): { discord_id, display_name, role, enviadas } no período.
+ * @property {(periodId?: string) => Result<object[]>} listEvaluationReminders    avaliacoes.ler ou avaliacoes.gerenciar. Lembretes enviados,
+ *           mais recentes primeiro: { id, period_id, kind, sent, failed, sent_by, sent_by_name, sent_at }.
+ * @property {(r: { period_id: string, kind: 'abertura'|'pendentes', siteUrl?: string }) => Result<{ sent_at: string, dm: { sent: number,
+ *           failed: string[] }, registrado: boolean }>} sendEvaluationReminder    avaliacoes.gerenciar. Privado pelo bot (Edge Function, ação
+ *           lembrete_avaliacao): abertura = todos que avaliam; pendentes = quem ainda não enviou nenhuma. Período encerrado é recusado.
+ *
  * Etapa 10 · produtividade (13_produtividade.sql; conta em js/core/productivity.js)
  * @property {(p: { from: string, to: string }) => Result<Productivity>} getProductivity   produtividade.ver. to exclusivo.
  * @property {() => Result<Array<{ discord_id: string, display_name: string }>>} listStaffNames   Staff: nomes de toda a equipe.
@@ -432,6 +450,7 @@ export const ADAPTER_METHODS = Object.freeze([
   'getDiretoriaMembers', 'listDirectorEvaluations', 'saveDirectorEvaluation', 'listOccurrences', 'saveOccurrence', 'listRoleHistory',
   'changeMemberRole', 'getDiretoriaActivity', 'getPromotionRules', 'savePromotionRules', 'getDirectorScore',
   'getEvaluationsByArea', 'listReceivedEvaluations', 'callAlignment', 'listAlignments',
+  'listEvaluationDecisions', 'registerEvaluationDecision', 'getEvaluationCoverage', 'listEvaluationReminders', 'sendEvaluationReminder',
   'getProductivity', 'listStaffNames',
 ]);
 
@@ -497,7 +516,7 @@ export const WEBHOOK_COLUMNS = Object.freeze([
 ]);
 
 /** Módulos que o banco pode ter (Staff.features). */
-export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avisos', 'diretoria', 'discord_cargos', 'lore', 'perfil', 'produtividade', 'regras']);
+export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'lore', 'perfil', 'produtividade', 'regras']);
 
 /** Campos que o cliente pode definir. Todo o resto é do servidor. */
 export const EDITABLE_FIELDS = Object.freeze([

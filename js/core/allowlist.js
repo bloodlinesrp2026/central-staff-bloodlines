@@ -991,6 +991,55 @@ export function buildAlignmentChannelMessage(memberId, opts = {}) {
   };
 }
 
+/* ======================= Plano 12 · lembretes das avaliações da equipe ======================= */
+export const EVALUATION_REMINDER_ERRORS = Object.freeze({
+  forbidden: 'Seu cargo não permite enviar lembretes das avaliações.',
+  period: 'Período de avaliação não encontrado.',
+  closed: 'Este período de avaliação já foi encerrado.',
+  kind: 'Tipo de lembrete desconhecido.',
+  noRecipients: 'Ninguém para lembrar: todos que avaliam já enviaram pelo menos uma avaliação.',
+  outdatedFunction: 'A função enviar-discord instalada no Supabase é de uma versão antiga e ainda não envia lembretes das avaliações. Avise a administração para colar o arquivo novo (supabase/functions/enviar-discord/index.ts) e clicar Deploy.',
+});
+
+export const EVALUATION_REMINDER_KINDS = Object.freeze(['abertura', 'pendentes']);
+
+/** Quem recebe: abertura = todos que avaliam; pendentes = quem ainda não enviou nenhuma (lista de avaliacao_cobertura). */
+export function evaluationReminderRecipients(coverage = [], kind) {
+  const pick = (c) => ({ discord_id: c.discord_id, display_name: c.display_name });
+  if (kind === 'abertura') return coverage.map(pick);
+  if (kind === 'pendentes') return coverage.filter((c) => !c.enviadas).map(pick);
+  return [];
+}
+
+/**
+ * Privado do bot para quem avalia (Decisão 4 do plano 12): abertura do período ou lembrete de quem ainda não enviou.
+ * @param {{ title: string, ends_at: string }} period
+ * @param {{ kind: 'abertura'|'pendentes', senderName?: string, siteUrl?: string, now?: Date }} opts
+ */
+export function buildEvaluationReminderDm(period, { kind, senderName = '', siteUrl = '', now = new Date() } = {}) {
+  const url = /^https:\/\/\S+$/.test(clean(siteUrl)) ? `${clean(siteUrl).replace(/[#/]+$/, '')}/#/avaliacoes-equipe` : '';
+  const opening = kind === 'abertura';
+  const fields = [
+    { name: '◷ Fecha em', value: discordTime(period.ends_at), inline: true },
+    ...(clean(senderName) ? [{ name: '✎ Enviado por', value: clean(senderName).slice(0, 256), inline: true }] : []),
+  ];
+  return {
+    content: opening ? 'Período de avaliação da equipe aberto.' : 'Lembrete: você ainda não enviou avaliações neste período.',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: clean(period.title).slice(0, 256) || 'Avaliação da equipe',
+      description: opening
+        ? 'A Direção abriu o período de avaliação. Avalie os membros de cargo abaixo do seu na Central da Staff antes do prazo.'
+        : 'O período de avaliação está aberto e ainda não recebemos nenhuma avaliação sua. Envie antes do prazo.',
+      ...(url ? { url } : {}),
+      color: 0x8B0000,
+      fields,
+      timestamp: new Date(now).toISOString(),
+      footer: { text: 'Bloodlines RP · Central da Staff' },
+    }],
+  };
+}
+
 export const DISCORD_ROLE_ID_ERROR = 'ID do cargo: só números, de 17 a 20 dígitos.';
 /** Valida { cargo: id } (vazio = sem marcação para aquele cargo). */
 export function validateDiscordRoleIds(map = {}) {

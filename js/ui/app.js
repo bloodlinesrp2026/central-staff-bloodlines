@@ -343,7 +343,7 @@ export function createApp(adapter, { isMock = false } = {}) {
       areasAdmin: () => renderAreasAdmin(app),
       area: () => renderArea(app, route.slug),
       perfil: () => renderPerfil(app, route.slug ?? null),
-      diretoria: () => renderDiretoria(app, route.slug ?? null),
+      diretoria: () => renderDiretoria(app, route.slug ?? null, route.id ?? null),
       notfound: () => renderMessage(app, { title: 'Página não encontrada', text: 'Volte para a lista de procedimentos.' }),
     };
     const mount = () => {
