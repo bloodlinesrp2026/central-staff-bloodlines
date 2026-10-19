@@ -28,6 +28,10 @@ import {
   AREA_EVAL_ERRORS, DIRETORIA_ERRORS, SCORE_FIELDS, alignmentMeetingInput, pickDirectorEvaluation, promotionRulesError, reasonError,
   validateDirectorEvaluation, validateOccurrence,
 } from '../core/diretoria.js';
+import {
+  ESCALA_ERRORS, ESC_DISCORD_ERRORS, DEFAULT_ESCALA_CONFIG, pickEscalaConfig, sessionView, validateAvailability, validateEscalaConfig,
+  validateOpenEscala, validatePrintFile, validateRegistro, validateRegistroEdit, validateSlots, validateSubstitution,
+} from '../core/escalas.js';
 import { CONFLICT_PREFIX, MEETING_STATUS_ERRORS, participantLabel, pickMeeting, validateMeeting } from '../core/agenda.js';
 import {
   PROPOSAL_ERRORS, PROPOSAL_NOTE_MAX, proposalStatus, validateAnnouncement, validateEvaluation, NO_EMOJI_MESSAGE, hasEmoji,
@@ -49,6 +53,7 @@ const PRINTS_BUCKET = 'al-prints';
 const PHOTOS_BUCKET = 'character-photos';
 // '*' (e não a lista): o campo status só existe depois do SQL 18; o site funciona com o banco antigo e com o novo.
 const MEETING_COLUMNS = '*, meeting_participants (kind, value)';
+const ESC_PRINTS_BUCKET = 'entrevistas-prints';
 const AREA_COLUMNS = 'id, nome, slug, descricao, icone, cor, nivel_minimo, status, discord_role_id, discord_canal_id, ordem, criado_por, criado_em, atualizado_em';
 const AREA_PROCEDURE_COLUMNS = 'id, area_id, titulo, conteudo, status, tags, criado_por, criado_em, atualizado_por, atualizado_em';
 const AREA_TAG_COLUMNS = 'id, area_id, nome, cor, discord_role_id';
@@ -1930,6 +1935,300 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
       });
     },
 
+    /* ----- Entrevistas: escala, agenda e registro (24_escalas.sql) ----- */
+    async getEscalaConfig() {
+      const { can, error: g } = await guard();
+      if (g) return g;
+      if (!escCanRead(can)) return fail('FORBIDDEN');
+      return escReadConfig();
+    },
+
+    async saveEscalaConfig(input = {}) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const current = await escReadConfig();
+      if (current.error) return current;
+      const next = { ...current.data, ...pickEscalaConfig(input) };
+      const { valid, errors } = validateEscalaConfig(next);
+      if (!valid) return validation(errors);
+      const blank = (v) => (String(v ?? '').trim() === '' ? null : String(v).trim());
+      const { error, status } = await sb.from('entrevistas_configuracao').update({
+        dias_semana: next.dias_semana, horarios: next.horarios, antecedencia_aviso_minutos: next.antecedencia_aviso_minutos,
+        canal_discord_escala: blank(next.canal_discord_escala), canal_discord_registros: blank(next.canal_discord_registros),
+        canal_discord_avisos: blank(next.canal_discord_avisos), cargo_discord_entrevistador: blank(next.cargo_discord_entrevistador),
+        cargo_discord_suporte: blank(next.cargo_discord_suporte), mensagem_link_call: next.mensagem_link_call, mensagem_cargo_id: next.mensagem_cargo_id,
+      }).eq('id', 1);
+      if (error) return failFrom(error, status);
+      return escReadConfig();
+    },
+
+    async getEscala(id) {
+      const { staff, can, error: g } = await guard();
+      if (g) return g;
+      if (!escCanRead(can)) return fail('FORBIDDEN');
+      const query = sb.from('escalas').select('*');
+      const { data: escala, error, status } = id ? await query.eq('id', id).maybeSingle() : await query.neq('status', 'encerrada').maybeSingle();
+      if (error) return failFrom(error, status);
+      if (!escala) return id ? fail('NOT_FOUND', ESCALA_ERRORS.noEscala) : ok({ escala: null, slots: [], minha_disponibilidade: [], respondi: false });
+      // Sempre filtra pelo próprio Discord ID: a Direção enxerga a disponibilidade de todos (lição 2).
+      const [slots, mine, answered] = await Promise.all([
+        sb.from('escalas_slots').select('id, dia_semana, horario, discord_id, funcao, realocado_por, realocado_em').eq('escala_id', escala.id),
+        sb.from('escalas_disponibilidade').select('dia_semana, horario').eq('escala_id', escala.id).eq('discord_id', staff.discord_id),
+        sb.from('escalas_respostas').select('discord_id').eq('escala_id', escala.id).eq('discord_id', staff.discord_id),
+        loadNames(),
+      ]);
+      for (const r of [slots, mine, answered]) if (r.error) return failFrom(r.error, r.status);
+      return ok({
+        escala,
+        slots: slots.data.map((s) => ({ ...s, display_name: nameOf(s.discord_id) })),
+        minha_disponibilidade: mine.data,
+        respondi: answered.data.length > 0,
+      });
+    },
+
+    async listEscalas() {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const [list, slots, sessions] = await Promise.all([
+        sb.from('escalas').select('*').order('periodo_inicio', { ascending: false }),
+        sb.from('escalas_slots').select('escala_id'),
+        sb.from('entrevistas_sessoes').select('escala_id'),
+      ]);
+      for (const r of [list, slots, sessions]) if (r.error) return failFrom(r.error, r.status);
+      const count = (rows, id) => rows.filter((r) => r.escala_id === id).length;
+      return ok(list.data.map((e) => ({ ...e, slots_total: count(slots.data, e.id), sessoes_total: count(sessions.data, e.id) })));
+    },
+
+    async openEscala(input = {}) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const { valid, errors } = validateOpenEscala(input);
+      if (!valid) return validation(errors);
+      const { data: id, error, status } = await sb.rpc('abrir_escala', {
+        p_inicio: input.periodo_inicio, p_fim: input.periodo_fim, p_encerramento: new Date(input.encerramento).toISOString(),
+      });
+      if (error) return failFrom(error, status);
+      const { data, error: e2, status: s2 } = await sb.from('escalas').select('*').eq('id', id).maybeSingle();
+      return e2 ? failFrom(e2, s2) : ok(data);
+    },
+
+    async getAvailabilitySummary(escalaId) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const { data, error, status } = await sb.rpc('get_disponibilidade_resumo', { p_escala: escalaId });
+      if (error) return failFrom(error, status);
+      return ok({ membros: data?.membros ?? [], celulas: data?.celulas ?? [] });
+    },
+
+    async saveMyAvailability(escalaId, slots = []) {
+      const { error: g } = await guard('allowlist.avaliar');
+      if (g) return g;
+      const cfg = await escReadConfig();
+      if (cfg.error) return cfg;
+      const { valid, errors } = validateAvailability(slots, cfg.data);
+      if (!valid) return validation(errors);
+      const { data, error, status } = await sb.rpc('registrar_disponibilidade', {
+        p_escala: escalaId, p_slots: slots.map(({ dia_semana, horario }) => ({ dia_semana, horario })),
+      });
+      return error ? failFrom(error, status) : ok({ total: data ?? 0 });
+    },
+
+    async closeAvailability(escalaId) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const { error, status } = await sb.rpc('fechar_disponibilidade', { p_escala: escalaId });
+      if (error) return failFrom(error, status);
+      const { data, error: e2, status: s2 } = await sb.from('escalas').select('*').eq('id', escalaId).maybeSingle();
+      return e2 ? failFrom(e2, s2) : ok(data);
+    },
+
+    async saveEscalaSlots(escalaId, slots = []) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const { valid, errors } = validateSlots(slots);
+      if (!valid) return validation(errors);
+      const { data, error, status } = await sb.rpc('salvar_slots', {
+        p_escala: escalaId, p_slots: slots.map(({ dia_semana, horario, discord_id, funcao }) => ({ dia_semana, horario, discord_id, funcao })),
+      });
+      return error ? failFrom(error, status) : ok({ total: data ?? 0 });
+    },
+
+    async publishEscala(escalaId) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const { data: created, error, status } = await sb.rpc('publicar_escala', { p_escala: escalaId });
+      if (error) return failFrom(error, status);
+      // Publicada no banco: a falha do Discord não desfaz, só avisa.
+      const sent = await invokeSend({ action: 'publicar_escala_discord', escala_id: escalaId });
+      const { data: escala } = await sb.from('escalas').select('*').eq('id', escalaId).maybeSingle();
+      return ok({ escala, sessoes: created ?? 0, discord_error: sent.error ? escDiscordError(sent.error) : null });
+    },
+
+    async sendEscalaToDiscord(escalaId) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const res = await invokeSend({ action: 'publicar_escala_discord', escala_id: escalaId });
+      if (res.error?.message === 'Ação desconhecida.') return fail('NETWORK', ESC_DISCORD_ERRORS.outdatedFunction);
+      return res;
+    },
+
+    async endEscala(escalaId) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const { error, status } = await sb.rpc('encerrar_escala', { p_escala: escalaId });
+      return error ? failFrom(error, status) : ok(null);
+    },
+
+    async reallocateSlot(slotId, novoId) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const { error, status } = await sb.rpc('realocar_slot', { p_slot: slotId, p_novo: String(novoId) });
+      return error ? failFrom(error, status) : ok(null);
+    },
+
+    async listInterviewSessions({ from, to } = {}) {
+      const { can, error: g } = await guard();
+      if (g) return g;
+      if (!escCanRead(can)) return fail('FORBIDDEN');
+      const { data, error, status } = await sb.rpc('get_agenda', { p_inicio: from ?? '2000-01-01', p_fim: to ?? '2100-12-31' });
+      if (error) return failFrom(error, status);
+      await loadNames();
+      return ok((data ?? []).map(escPresentSession));
+    },
+
+    async getInterviewSession(id) {
+      const { can, error: g } = await guard();
+      if (g) return g;
+      if (!escCanRead(can)) return fail('FORBIDDEN');
+      const [ses, people, reg, hist] = await Promise.all([
+        sb.from('entrevistas_sessoes').select('*').eq('id', id).maybeSingle(),
+        sb.from('entrevistas_participantes').select('discord_id, funcao, substituindo_id, presente').eq('sessao_id', id).order('adicionado_em'),
+        sb.from('entrevistas_registros').select('*').eq('sessao_id', id).maybeSingle(),
+        sb.from('escalas_historico').select('id, tipo, referencia_id, discord_id, dados_anteriores, dados_novos, criado_em').eq('referencia_id', id).order('id', { ascending: false }),
+        loadNames(),
+      ]);
+      for (const r of [ses, people, reg, hist]) if (r.error) return failFrom(r.error, r.status);
+      if (!ses.data) return fail('NOT_FOUND', ESCALA_ERRORS.noSession);
+      return ok({
+        ...escPresentSession({ ...ses.data, tem_registro: Boolean(reg.data), participantes: people.data }),
+        registro: reg.data ? { ...reg.data, registrado_por_nome: nameOf(reg.data.registrado_por) } : null,
+        historico: hist.data.map((h) => ({ ...h, autor_nome: nameOf(h.discord_id) })),
+      });
+    },
+
+    async setInterviewSessionStatus(id, status) {
+      const { error: g } = await guard();
+      if (g) return g;
+      const { error, status: code } = await sb.rpc('alterar_status_sessao', { p_sessao: id, p_status: status });
+      if (error) return failFrom(error, code);
+      return adapter.getInterviewSession(id);
+    },
+
+    async registerSubstitution(sessaoId, input = {}) {
+      const { error: g } = await guard();
+      if (g) return g;
+      const { valid, errors } = validateSubstitution(input);
+      if (!valid) return validation(errors);
+      const { error, status } = await sb.rpc('registrar_substituicao', {
+        p_sessao: sessaoId, p_original: input.original, p_substituto: input.substituto, p_motivo: String(input.motivo ?? '').trim() || null,
+      });
+      return error ? failFrom(error, status) : adapter.getInterviewSession(sessaoId);
+    },
+
+    async registerAbsence(sessaoId, discordId) {
+      const { error: g } = await guard();
+      if (g) return g;
+      const { error, status } = await sb.rpc('registrar_ausencia', { p_sessao: sessaoId, p_discord_id: String(discordId) });
+      return error ? failFrom(error, status) : adapter.getInterviewSession(sessaoId);
+    },
+
+    async registerInterview(sessaoId, input = {}) {
+      const { error: g } = await guard();
+      if (g) return g;
+      const print = input.print ?? null;
+      const { valid, errors } = validateRegistro({ ...input, tem_print: Boolean(print) });
+      if (!valid) return validation(errors);
+      const file = validatePrintFile(print);
+      if (!file.valid) return validation({ print: file.error });
+      const path = `${sessaoId}/${globalThis.crypto.randomUUID()}.${print.type.split('/')[1].replace('jpeg', 'jpg')}`;
+      const up = await sb.storage.from(ESC_PRINTS_BUCKET).upload(path, print.blob ?? print, { contentType: print.type, upsert: false });
+      if (up.error) return failFrom(up.error, up.error.statusCode ?? up.error.status);
+      const { data: id, error, status } = await sb.rpc('registrar_sessao', {
+        p_sessao: sessaoId, p_total: Number(input.total_entrevistados), p_obs: String(input.observacoes ?? '').trim() || null, p_print_path: path,
+        p_participantes: (input.participantes ?? []).map((p) => ({ discord_id: p.discord_id, funcao: p.funcao, presente: p.presente !== false, substituindo_id: p.substituindo_id || '' })),
+      });
+      if (error) {
+        // Nada foi registrado: o arquivo enviado não fica órfão.
+        await sb.storage.from(ESC_PRINTS_BUCKET).remove([path]);
+        return failFrom(error, status);
+      }
+      const sent = await invokeSend({ action: 'enviar_registro_discord', sessao_id: sessaoId });
+      const { data: registro } = await sb.from('entrevistas_registros').select('*').eq('id', id).maybeSingle();
+      return ok({ registro, discord_error: sent.error ? escDiscordError(sent.error) : null });
+    },
+
+    async editInterviewRegistro(sessaoId, input = {}) {
+      const { error: g } = await guard();
+      if (g) return g;
+      const { valid, errors } = validateRegistroEdit(input);
+      if (!valid) return validation(errors);
+      let path = null;
+      if (input.print) {
+        const file = validatePrintFile(input.print);
+        if (!file.valid) return validation({ print: file.error });
+        path = `${sessaoId}/${globalThis.crypto.randomUUID()}.${input.print.type.split('/')[1].replace('jpeg', 'jpg')}`;
+        const up = await sb.storage.from(ESC_PRINTS_BUCKET).upload(path, input.print.blob ?? input.print, { contentType: input.print.type, upsert: false });
+        if (up.error) return failFrom(up.error, up.error.statusCode ?? up.error.status);
+      }
+      const { error, status } = await sb.rpc('editar_registro', {
+        p_sessao: sessaoId, p_total: Number(input.total_entrevistados), p_obs: String(input.observacoes ?? '').trim() || null, p_print_path: path,
+      });
+      if (error) {
+        if (path) await sb.storage.from(ESC_PRINTS_BUCKET).remove([path]);
+        return failFrom(error, status);
+      }
+      const { data, error: e2, status: s2 } = await sb.from('entrevistas_registros').select('*').eq('sessao_id', sessaoId).maybeSingle();
+      return e2 ? failFrom(e2, s2) : ok(data);
+    },
+
+    async getInterviewPrintUrl(sessaoId) {
+      const { can, error: g } = await guard();
+      if (g) return g;
+      if (!escCanRead(can)) return fail('FORBIDDEN');
+      const { data, error, status } = await sb.from('entrevistas_registros').select('print_call_path').eq('sessao_id', sessaoId).maybeSingle();
+      if (error) return failFrom(error, status);
+      if (!data) return fail('NOT_FOUND', ESCALA_ERRORS.noRegistro);
+      const signed = await sb.storage.from(ESC_PRINTS_BUCKET).createSignedUrl(data.print_call_path, 3600);
+      if (signed.error) return failFrom(signed.error, signed.error.statusCode ?? signed.error.status);
+      return ok(signed.data?.signedUrl ?? null);
+    },
+
+    async sendInterviewRegistro(sessaoId, { resend = false } = {}) {
+      const { error: g } = await guard();
+      if (g) return g;
+      const res = await invokeSend({ action: 'enviar_registro_discord', sessao_id: sessaoId, resend });
+      if (res.error?.message === 'Ação desconhecida.') return fail('NETWORK', ESC_DISCORD_ERRORS.outdatedFunction);
+      return res;
+    },
+
+    async sendInterviewNotice(sessaoId) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const res = await invokeSend({ action: 'enviar_aviso_entrevista', sessao_id: sessaoId });
+      if (res.error?.message === 'Ação desconhecida.') return fail('NETWORK', ESC_DISCORD_ERRORS.outdatedFunction);
+      return res;
+    },
+
+    async listEscalaHistory({ limit = 100 } = {}) {
+      const { error: g } = await guard('escalas.gerenciar');
+      if (g) return g;
+      const { data, error, status } = await sb.from('escalas_historico')
+        .select('id, tipo, referencia_id, discord_id, dados_anteriores, dados_novos, criado_em').order('id', { ascending: false }).limit(Math.min(Number(limit) || 100, 500));
+      if (error) return failFrom(error, status);
+      await loadNames();
+      return ok(data.map((h) => ({ ...h, autor_nome: nameOf(h.discord_id) })));
+    },
+
     async listStaffNames() {
       const { error: g } = await guard();
       if (g) return g;
@@ -2030,6 +2329,25 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
     }
     await loadNames();
     return ok(presentMeeting(data[0]));
+  }
+
+  /* ---------- entrevistas: escala e registro ---------- */
+  const escCanRead = (can) => can('allowlist.avaliar') || can('escalas.gerenciar');
+  const escPresentSession = (s) => {
+    const out = { ...s, participantes: (s.participantes ?? []).map((p) => ({ ...p, display_name: nameOf(p.discord_id) })) };
+    return { ...out, view: sessionView(out, new Date()) };
+  };
+  /** Falha do Discord vira texto simples (a função antiga ainda não conhece as ações das entrevistas). */
+  const escDiscordError = (error) => (error.message === 'Ação desconhecida.' ? ESC_DISCORD_ERRORS.outdatedFunction : error.details?.errors?._ ?? error.message);
+  async function escReadConfig() {
+    const { data, error, status } = await sb.from('entrevistas_configuracao').select('*').eq('id', 1).maybeSingle();
+    if (error) return failFrom(error, status);
+    const row = data ?? {};
+    return ok({
+      ...structuredClone(DEFAULT_ESCALA_CONFIG), ...row,
+      canal_discord_escala: row.canal_discord_escala ?? '', canal_discord_registros: row.canal_discord_registros ?? '', canal_discord_avisos: row.canal_discord_avisos ?? '',
+      cargo_discord_entrevistador: row.cargo_discord_entrevistador ?? '', cargo_discord_suporte: row.cargo_discord_suporte ?? '',
+    });
   }
 
   /** Avisos da reunião pela Edge Function: kind 'anuncio' (canal), 'convocacao' ou 'inicio' (privado). */

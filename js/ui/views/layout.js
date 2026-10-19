@@ -74,6 +74,10 @@ export function navGroups(app) {
           && { href: '#/avaliacoes', ico: 'history', label: 'Histórico de allowlist', hint: 'Análises e entrevistas já feitas.' },
         app.feature('agenda') && (app.can('agenda.ler') || app.can('agenda.gerenciar'))
           && { href: '#/agenda', ico: 'calendar-event', label: 'Agenda de Reuniões', hint: 'Reuniões marcadas e as que estão ao vivo.' },
+        app.feature('escalas') && (app.can('allowlist.avaliar') || app.can('escalas.gerenciar'))
+          && { href: '#/entrevistas', ico: 'calendar-time', label: 'Escala de entrevistas', hint: 'Sua escala, a agenda das entrevistas e o registro de cada sessão.' },
+        app.feature('escalas') && app.can('escalas.gerenciar')
+          && { href: '#/entrevistas/gestao', ico: 'adjustments-alt', label: 'Gestão da escala', hint: 'Abrir a escala, analisar a disponibilidade, publicar e configurar.' },
         app.feature('areas') && { href: '#/areas', ico: 'users-group', label: 'Minhas Áreas', dot: (c.noAreas ?? 0) > 0, hint: 'As áreas da staff em que você atua.' },
       ],
     },

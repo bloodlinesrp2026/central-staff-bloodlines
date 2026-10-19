@@ -26,6 +26,10 @@ import {
   AREA_ERRORS, AREA_MANAGE_ERRORS, AREA_ROLES, areaEventName, DEFAULT_AREA_COLOR, DEFAULT_TAG_COLOR, areaProcedureAccess, areaSlug, historyRange, pickArea,
   pickAreaProcedure, pickAreaTag, validateArea, validateAreaProcedure, validateAreaTag,
 } from '../core/areas.js';
+import {
+  ESCALA_ERRORS, ESC_DISCORD_ERRORS, cellKey, datesInPeriod, horarioSortKey, pickEscalaConfig, sessionStart, sessionView, validateAvailability, validateEscalaConfig,
+  validateOpenEscala, validatePrintFile, validateRegistro, validateRegistroEdit, validateSlots, validateSubstitution, weekdayOf, DEFAULT_ESCALA_CONFIG,
+} from '../core/escalas.js';
 import { PROFILE_ERRORS, pickProfileEdit, safeAvatar, validateProfileEdit } from '../core/perfil.js';
 import {
   AREA_EVAL_ERRORS, DIRETORIA_ERRORS, alignmentMeetingInput, averagesByArea, pickDirectorEvaluation, promotionRulesError, reasonError,
@@ -102,6 +106,7 @@ function allowlistState(seed, nowIso) {
     ...loreState(),
     ...rulesState(),
     ...agendaState(),
+    ...escalasState(),
     ...areasState(nowIso),
     ...diretoriaState(),
   };
@@ -121,6 +126,12 @@ const rulesState = () => ({ rules: [] });
 
 /** Agenda de Reuniões: vazia no começo. Cada reunião guarda seus convocados em `participants`. */
 const agendaState = () => ({ meetings: [] });
+
+/** Escala e registro das entrevistas (24_escalas.sql): configuração padrão e tudo vazio. */
+const escalasState = () => ({
+  escCfg: { ...structuredClone(DEFAULT_ESCALA_CONFIG), atualizado_por: null, atualizado_em: null },
+  escalas: [], escDisp: [], escResp: [], escSlots: [], escSessoes: [], escPart: [], escRegs: [], escHist: [],
+});
 
 /** Áreas da Staff: algumas áreas de exemplo (o banco começa vazio; a gestão cria as reais), sem membros. */
 const areasState = (nowIso) => {
@@ -177,6 +188,7 @@ export function createMockAdapter({
       if (!parsed.characters) Object.assign(parsed, loreState());
       if (!parsed.rules) Object.assign(parsed, rulesState());
       if (!parsed.meetings) Object.assign(parsed, agendaState());
+      if (!parsed.escCfg) Object.assign(parsed, escalasState());
       if (!parsed.areas) Object.assign(parsed, areasState(nowIso()));
       if (!parsed.dirEvaluations) Object.assign(parsed, diretoriaState());
       return parsed;
@@ -235,6 +247,25 @@ export function createMockAdapter({
     } catch (err) {
       return fail('NETWORK', `Erro inesperado: ${err?.message ?? err}`);
     }
+  }
+
+  /* ---------- entrevistas: escala e registro ---------- */
+  const escCanRead = (can) => can('allowlist.avaliar') || can('escalas.gerenciar');
+  const escEligible = (discordId) => {
+    const s = state.staff.find((x) => x.discord_id === discordId && x.active);
+    return Boolean(s) && permsOf(s).includes('allowlist.avaliar');
+  };
+  const escIsParticipant = (sessaoId, discordId) => state.escPart.some((p) => p.sessao_id === sessaoId && p.discord_id === discordId && p.presente);
+  const escTimeKey = (horario) => horarioSortKey(horario);
+  const escLog = (tipo, ref, actor, antes, depois) => state.escHist.push({
+    id: state.escHist.length + 1, tipo, referencia_id: ref, discord_id: actor ?? 'sistema', dados_anteriores: antes ?? null, dados_novos: depois ?? null, criado_em: nowIso(),
+  });
+  const escPresentSlot = (s) => ({ ...clone(s), display_name: nameOf(s.discord_id) });
+  function escPresentSession(s) {
+    const participantes = state.escPart.filter((p) => p.sessao_id === s.id)
+      .map((p) => ({ discord_id: p.discord_id, display_name: nameOf(p.discord_id), funcao: p.funcao, substituindo_id: p.substituindo_id, presente: p.presente }));
+    const out = { ...clone(s), tem_registro: state.escRegs.some((r) => r.sessao_id === s.id), participantes };
+    return { ...out, view: sessionView(out, now()) };
   }
 
   /* ---------- procedimentos ---------- */
@@ -2190,6 +2221,398 @@ export function createMockAdapter({
           from: new Date(from).toISOString(), to: new Date(to).toISOString(),
         }));
       });
+    },
+
+    /* ----- Entrevistas: escala, agenda e registro (24_escalas.sql; regras em js/core/escalas.js) ----- */
+    async getEscalaConfig() {
+      return run('getEscalaConfig', 'staff', async ({ can }) => {
+        if (!escCanRead(can)) return fail('FORBIDDEN');
+        return ok(clone(state.escCfg));
+      });
+    },
+
+    async saveEscalaConfig(input = {}) {
+      return run('saveEscalaConfig', 'escalas.gerenciar', async ({ staff }) => {
+        const next = { ...state.escCfg, ...pickEscalaConfig(input) };
+        const { valid, errors } = validateEscalaConfig(next);
+        if (!valid) return validationError(errors);
+        state.escCfg = { ...next, atualizado_por: staff.discord_id, atualizado_em: nowIso() };
+        save();
+        return ok(clone(state.escCfg));
+      });
+    },
+
+    async getEscala(id) {
+      return run('getEscala', 'staff', async ({ staff, can }) => {
+        if (!escCanRead(can)) return fail('FORBIDDEN');
+        const escala = id ? state.escalas.find((e) => e.id === id) : state.escalas.find((e) => e.status !== 'encerrada');
+        if (id && !escala) return fail('NOT_FOUND', ESCALA_ERRORS.noEscala);
+        if (!escala) return ok({ escala: null, slots: [], minha_disponibilidade: [], respondi: false });
+        return ok({
+          escala: clone(escala),
+          slots: state.escSlots.filter((s) => s.escala_id === escala.id).map(escPresentSlot),
+          minha_disponibilidade: state.escDisp.filter((d) => d.escala_id === escala.id && d.discord_id === staff.discord_id).map(({ dia_semana, horario }) => ({ dia_semana, horario })),
+          respondi: state.escResp.some((r) => r.escala_id === escala.id && r.discord_id === staff.discord_id),
+        });
+      });
+    },
+
+    async listEscalas() {
+      return run('listEscalas', 'escalas.gerenciar', async () => ok(
+        [...state.escalas].sort((a, b) => b.periodo_inicio.localeCompare(a.periodo_inicio)).map((e) => ({
+          ...clone(e), slots_total: state.escSlots.filter((s) => s.escala_id === e.id).length,
+          sessoes_total: state.escSessoes.filter((s) => s.escala_id === e.id).length,
+        }))));
+    },
+
+    async openEscala(input = {}) {
+      return run('openEscala', 'escalas.gerenciar', async ({ staff }) => {
+        const { valid, errors } = validateOpenEscala(input, now());
+        if (!valid) return validationError(errors);
+        if (state.escalas.some((e) => e.status !== 'encerrada')) return validationError({ _: ESCALA_ERRORS.active });
+        const e = {
+          id: uuid(), periodo_inicio: input.periodo_inicio, periodo_fim: input.periodo_fim, status: 'aberta_disponibilidade',
+          abertura_disponibilidade_em: nowIso(), encerramento_disponibilidade_em: new Date(input.encerramento).toISOString(),
+          criado_por: staff.discord_id, criado_em: nowIso(), publicado_por: null, publicado_em: null, discord_message_id: null, discord_status: null,
+        };
+        state.escalas.push(e);
+        escLog('escala_aberta', e.id, staff.discord_id, null, { periodo_inicio: e.periodo_inicio, periodo_fim: e.periodo_fim });
+        save();
+        return ok(clone(e));
+      });
+    },
+
+    async getAvailabilitySummary(escalaId) {
+      return run('getAvailabilitySummary', 'escalas.gerenciar', async () => {
+        const e = state.escalas.find((x) => x.id === escalaId);
+        if (!e) return fail('NOT_FOUND', ESCALA_ERRORS.noEscala);
+        const membros = state.staff.filter((s) => s.active && escEligible(s.discord_id)).map((s) => ({
+          discord_id: s.discord_id, display_name: s.display_name, role: s.role, respondeu: state.escResp.some((r) => r.escala_id === e.id && r.discord_id === s.discord_id),
+        })).sort((a, b) => a.display_name.localeCompare(b.display_name, 'pt-BR'));
+        const cells = new Map();
+        for (const d of state.escDisp.filter((x) => x.escala_id === e.id)) {
+          const k = cellKey(d.dia_semana, d.horario);
+          if (!cells.has(k)) cells.set(k, { dia_semana: d.dia_semana, horario: d.horario, discord_ids: [] });
+          cells.get(k).discord_ids.push(d.discord_id);
+        }
+        return ok({ membros, celulas: [...cells.values()].map((c) => ({ ...c, discord_ids: c.discord_ids.sort() })) });
+      });
+    },
+
+    async saveMyAvailability(escalaId, slots = []) {
+      return run('saveMyAvailability', 'staff', async ({ staff, can }) => {
+        if (!escEligible(staff.discord_id)) return fail('FORBIDDEN');
+        const e = state.escalas.find((x) => x.id === escalaId);
+        if (!e || e.status !== 'aberta_disponibilidade') return validationError({ _: ESCALA_ERRORS.notOpen });
+        if (now().getTime() > Date.parse(e.encerramento_disponibilidade_em)) return validationError({ _: ESCALA_ERRORS.closed });
+        const { valid, errors } = validateAvailability(slots, state.escCfg);
+        if (!valid) return validationError(errors);
+        state.escDisp = state.escDisp.filter((d) => !(d.escala_id === e.id && d.discord_id === staff.discord_id));
+        const seen = new Set();
+        for (const s of slots) {
+          const k = cellKey(s.dia_semana, s.horario);
+          if (seen.has(k)) continue;
+          seen.add(k);
+          state.escDisp.push({ id: uuid(), escala_id: e.id, discord_id: staff.discord_id, dia_semana: s.dia_semana, horario: s.horario, criado_em: nowIso() });
+        }
+        state.escResp = state.escResp.filter((r) => !(r.escala_id === e.id && r.discord_id === staff.discord_id));
+        state.escResp.push({ escala_id: e.id, discord_id: staff.discord_id, respondeu_em: nowIso() });
+        save();
+        return ok({ total: seen.size });
+      });
+    },
+
+    async closeAvailability(escalaId) {
+      return run('closeAvailability', 'escalas.gerenciar', async ({ staff }) => {
+        const e = state.escalas.find((x) => x.id === escalaId);
+        if (!e || e.status !== 'aberta_disponibilidade') return validationError({ _: ESCALA_ERRORS.notOpen });
+        e.status = 'analise';
+        escLog('disponibilidade_encerrada', e.id, staff.discord_id, { status: 'aberta_disponibilidade' }, { status: 'analise' });
+        save();
+        return ok(clone(e));
+      });
+    },
+
+    async saveEscalaSlots(escalaId, slots = []) {
+      return run('saveEscalaSlots', 'escalas.gerenciar', async () => {
+        const e = state.escalas.find((x) => x.id === escalaId);
+        if (!e || e.status !== 'analise') return validationError({ _: ESCALA_ERRORS.notAnalysis });
+        const { valid, errors } = validateSlots(slots);
+        if (!valid) return validationError(errors);
+        if (slots.some((s) => !escEligible(s.discord_id))) return validationError({ _: ESCALA_ERRORS.notEligible });
+        state.escSlots = state.escSlots.filter((s) => s.escala_id !== e.id);
+        const seen = new Set();
+        for (const s of slots) {
+          const k = `${cellKey(s.dia_semana, s.horario)}|${s.discord_id}`;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          state.escSlots.push({ id: uuid(), escala_id: e.id, dia_semana: s.dia_semana, horario: s.horario, discord_id: s.discord_id, funcao: s.funcao, realocado_por: null, realocado_em: null });
+        }
+        save();
+        return ok({ total: seen.size });
+      });
+    },
+
+    async publishEscala(escalaId) {
+      return run('publishEscala', 'escalas.gerenciar', async ({ staff }) => {
+        const e = state.escalas.find((x) => x.id === escalaId);
+        if (!e || e.status !== 'analise') return validationError({ _: ESCALA_ERRORS.notAnalysis });
+        const slots = state.escSlots.filter((s) => s.escala_id === e.id);
+        if (!slots.length) return validationError({ _: ESCALA_ERRORS.empty });
+        Object.assign(e, { status: 'publicada', publicado_por: staff.discord_id, publicado_em: nowIso() });
+        let created = 0;
+        const dias = [...new Set(slots.map((s) => s.dia_semana))];
+        for (const data of datesInPeriod(e.periodo_inicio, e.periodo_fim, dias)) {
+          for (const horario of [...new Set(slots.filter((s) => s.dia_semana === weekdayOf(data)).map((s) => s.horario))]) {
+            if (sessionStart(data, horario).getTime() < now().getTime()) continue;
+            let ses = state.escSessoes.find((x) => x.data_entrevista === data && x.horario === horario);
+            if (!ses) {
+              ses = { id: uuid(), escala_id: e.id, data_entrevista: data, horario, status: 'agendada', aviso_enviado: false, aviso_enviado_em: null, aviso_erro: null };
+              state.escSessoes.push(ses);
+              created++;
+            }
+            if (ses.escala_id !== e.id) continue;
+            for (const s of slots.filter((x) => x.dia_semana === weekdayOf(data) && x.horario === horario)) {
+              if (!state.escPart.some((p) => p.sessao_id === ses.id && p.discord_id === s.discord_id)) {
+                state.escPart.push({ id: uuid(), sessao_id: ses.id, discord_id: s.discord_id, funcao: s.funcao, substituindo_id: null, presente: true, adicionado_por: staff.discord_id, adicionado_em: nowIso() });
+              }
+            }
+          }
+        }
+        e.discord_status = state.escCfg.canal_discord_escala ? 'enviado em 1 mensagem(ns)' : null;
+        escLog('escala_publicada', e.id, staff.discord_id, { status: 'analise' }, { status: 'publicada', sessoes_criadas: created });
+        save();
+        return ok({ escala: clone(e), sessoes: created, discord_error: state.escCfg.canal_discord_escala ? null : ESC_DISCORD_ERRORS.noChannel });
+      });
+    },
+
+    async sendEscalaToDiscord(escalaId) {
+      return run('sendEscalaToDiscord', 'escalas.gerenciar', async () => {
+        const e = state.escalas.find((x) => x.id === escalaId);
+        if (!e) return fail('NOT_FOUND', ESC_DISCORD_ERRORS.notFound);
+        if (e.status !== 'publicada') return validationError({ _: ESC_DISCORD_ERRORS.notPublished });
+        if (!state.escCfg.canal_discord_escala) return validationError({ _: ESC_DISCORD_ERRORS.noChannel });
+        Object.assign(e, { discord_message_id: `mock-${e.id}`, discord_status: 'enviado em 1 mensagem(ns)' });
+        save();
+        return ok({ discord_status: e.discord_status, discord_message_id: e.discord_message_id });
+      });
+    },
+
+    async endEscala(escalaId) {
+      return run('endEscala', 'escalas.gerenciar', async ({ staff }) => {
+        const e = state.escalas.find((x) => x.id === escalaId);
+        if (!e) return fail('NOT_FOUND', ESCALA_ERRORS.noEscala);
+        const before = e.status;
+        e.status = 'encerrada';
+        escLog('escala_encerrada', e.id, staff.discord_id, { status: before }, { status: 'encerrada' });
+        save();
+        return ok(null);
+      });
+    },
+
+    async reallocateSlot(slotId, novoId) {
+      return run('reallocateSlot', 'escalas.gerenciar', async ({ staff }) => {
+        const s = state.escSlots.find((x) => x.id === slotId);
+        if (!s) return fail('NOT_FOUND', ESCALA_ERRORS.noSlot);
+        if (state.escalas.find((e) => e.id === s.escala_id)?.status !== 'publicada') return validationError({ _: ESCALA_ERRORS.notPublished });
+        if (!escEligible(novoId)) return validationError({ _: ESCALA_ERRORS.notEligible });
+        if (state.escSlots.some((x) => x.escala_id === s.escala_id && x.dia_semana === s.dia_semana && x.horario === s.horario && x.discord_id === novoId)) {
+          return validationError({ _: ESCALA_ERRORS.alreadyThere });
+        }
+        const before = { discord_id: s.discord_id, dia_semana: s.dia_semana, horario: s.horario, funcao: s.funcao };
+        for (const ses of state.escSessoes) {
+          if (ses.escala_id !== s.escala_id || ses.horario !== s.horario || weekdayOf(ses.data_entrevista) !== s.dia_semana || ses.status !== 'agendada') continue;
+          if (sessionStart(ses.data_entrevista, ses.horario).getTime() <= now().getTime() || state.escRegs.some((r) => r.sessao_id === ses.id)) continue;
+          const p = state.escPart.find((x) => x.sessao_id === ses.id && x.discord_id === s.discord_id);
+          if (p && !state.escPart.some((x) => x.sessao_id === ses.id && x.discord_id === novoId)) {
+            Object.assign(p, { discord_id: novoId, substituindo_id: s.discord_id, adicionado_por: staff.discord_id, adicionado_em: nowIso() });
+          }
+        }
+        Object.assign(s, { discord_id: novoId, realocado_por: staff.discord_id, realocado_em: nowIso() });
+        escLog('slot_realocado', s.id, staff.discord_id, before, { discord_id: novoId });
+        save();
+        return ok(null);
+      });
+    },
+
+    async listInterviewSessions({ from, to } = {}) {
+      return run('listInterviewSessions', 'staff', async ({ can }) => {
+        if (!escCanRead(can)) return fail('FORBIDDEN');
+        return ok(state.escSessoes.filter((s) => (!from || s.data_entrevista >= from) && (!to || s.data_entrevista <= to))
+          .sort((a, b) => a.data_entrevista.localeCompare(b.data_entrevista) || escTimeKey(a.horario).localeCompare(escTimeKey(b.horario)))
+          .map(escPresentSession));
+      });
+    },
+
+    async getInterviewSession(id) {
+      return run('getInterviewSession', 'staff', async ({ staff, can }) => {
+        if (!escCanRead(can)) return fail('FORBIDDEN');
+        const s = state.escSessoes.find((x) => x.id === id);
+        if (!s) return fail('NOT_FOUND', ESCALA_ERRORS.noSession);
+        const seesHistory = can('escalas.gerenciar') || escIsParticipant(s.id, staff.discord_id);
+        const reg = state.escRegs.find((r) => r.sessao_id === s.id) ?? null;
+        return ok({
+          ...escPresentSession(s),
+          registro: reg ? { ...clone(reg), registrado_por_nome: nameOf(reg.registrado_por) } : null,
+          historico: seesHistory
+            ? state.escHist.filter((h) => h.referencia_id === s.id).map((h) => ({ ...clone(h), autor_nome: nameOf(h.discord_id) })).reverse()
+            : [],
+        });
+      });
+    },
+
+    async setInterviewSessionStatus(id, status) {
+      return run('setInterviewSessionStatus', 'staff', async ({ staff, can }) => {
+        const s = state.escSessoes.find((x) => x.id === id);
+        if (!s) return fail('NOT_FOUND', ESCALA_ERRORS.noSession);
+        if (status === 'em_andamento') {
+          if (!(can('escalas.gerenciar') || escIsParticipant(id, staff.discord_id))) return validationError({ _: ESCALA_ERRORS.notParticipant });
+          if (s.status !== 'agendada') return validationError({ _: ESCALA_ERRORS.startOnly });
+        } else if (status === 'cancelada') {
+          if (!can('escalas.gerenciar')) return fail('FORBIDDEN');
+          if (['concluida', 'cancelada'].includes(s.status)) return validationError({ _: ESCALA_ERRORS.alreadyClosed });
+        } else return validationError({ _: ESCALA_ERRORS.badStatus });
+        const before = s.status;
+        s.status = status;
+        escLog(`sessao_${status}`, s.id, staff.discord_id, { status: before }, { status });
+        save();
+        return ok(escPresentSession(s));
+      });
+    },
+
+    async registerSubstitution(sessaoId, input = {}) {
+      return run('registerSubstitution', 'staff', async ({ staff, can }) => {
+        const s = state.escSessoes.find((x) => x.id === sessaoId);
+        if (!s) return fail('NOT_FOUND', ESCALA_ERRORS.noSession);
+        if (!(can('escalas.gerenciar') || escIsParticipant(sessaoId, staff.discord_id))) return validationError({ _: ESCALA_ERRORS.notParticipant });
+        if (state.escRegs.some((r) => r.sessao_id === sessaoId) && !can('escalas.gerenciar')) return validationError({ _: ESCALA_ERRORS.registeredLocked });
+        const { valid, errors } = validateSubstitution(input);
+        if (!valid) return validationError(errors);
+        const orig = state.escPart.find((p) => p.sessao_id === sessaoId && p.discord_id === input.original && p.presente);
+        if (!orig) return validationError({ _: ESCALA_ERRORS.leaving });
+        if (!escEligible(input.substituto)) return validationError({ _: ESCALA_ERRORS.notEligible });
+        const motivo = String(input.motivo ?? '').trim() || null;
+        orig.presente = false;
+        const existing = state.escPart.find((p) => p.sessao_id === sessaoId && p.discord_id === input.substituto);
+        if (existing) Object.assign(existing, { presente: true, funcao: orig.funcao, substituindo_id: input.original });
+        else state.escPart.push({ id: uuid(), sessao_id: sessaoId, discord_id: input.substituto, funcao: orig.funcao, substituindo_id: input.original, presente: true, adicionado_por: staff.discord_id, adicionado_em: nowIso() });
+        escLog('substituicao_registrada', sessaoId, staff.discord_id, { discord_id: input.original, funcao: orig.funcao }, { discord_id: input.substituto, motivo });
+        save();
+        return ok(escPresentSession(s));
+      });
+    },
+
+    async registerAbsence(sessaoId, discordId) {
+      return run('registerAbsence', 'staff', async ({ staff, can }) => {
+        const s = state.escSessoes.find((x) => x.id === sessaoId);
+        if (!s) return fail('NOT_FOUND', ESCALA_ERRORS.noSession);
+        if (!(can('escalas.gerenciar') || escIsParticipant(sessaoId, staff.discord_id))) return validationError({ _: ESCALA_ERRORS.notParticipant });
+        if (state.escRegs.some((r) => r.sessao_id === sessaoId) && !can('escalas.gerenciar')) return validationError({ _: ESCALA_ERRORS.registeredLocked });
+        const p = state.escPart.find((x) => x.sessao_id === sessaoId && x.discord_id === discordId && x.presente);
+        if (!p) return validationError({ _: ESCALA_ERRORS.absent });
+        p.presente = false;
+        escLog('ausencia_registrada', sessaoId, staff.discord_id, { discord_id: discordId, presente: true }, { discord_id: discordId, presente: false });
+        save();
+        return ok(escPresentSession(s));
+      });
+    },
+
+    async registerInterview(sessaoId, input = {}) {
+      return run('registerInterview', 'staff', async ({ staff, can }) => {
+        const s = state.escSessoes.find((x) => x.id === sessaoId && x.status !== 'cancelada');
+        if (!s) return fail('NOT_FOUND', ESCALA_ERRORS.noSession);
+        if (!(can('escalas.gerenciar') || escIsParticipant(sessaoId, staff.discord_id))) return validationError({ _: ESCALA_ERRORS.notParticipant });
+        if (state.escRegs.some((r) => r.sessao_id === sessaoId)) return validationError({ _: ESCALA_ERRORS.registered });
+        const print = input.print ?? null;
+        const { valid, errors } = validateRegistro({ ...input, tem_print: Boolean(print) });
+        if (!valid) return validationError(errors);
+        const file = validatePrintFile(print);
+        if (!file.valid) return validationError({ print: file.error });
+        if ((input.participantes ?? []).some((p) => !escEligible(p.discord_id))) return validationError({ _: ESCALA_ERRORS.notEligible });
+        for (const p of input.participantes ?? []) {
+          const row = state.escPart.find((x) => x.sessao_id === sessaoId && x.discord_id === p.discord_id);
+          const fields = { funcao: p.funcao, presente: p.presente !== false, substituindo_id: p.substituindo_id || null };
+          if (row) Object.assign(row, fields);
+          else state.escPart.push({ id: uuid(), sessao_id: sessaoId, discord_id: p.discord_id, ...fields, adicionado_por: staff.discord_id, adicionado_em: nowIso() });
+        }
+        const path = `${sessaoId}/${uuid()}.${(print.type || 'image/png').split('/')[1].replace('jpeg', 'jpg')}`;
+        printFiles.set(path, print);
+        const reg = {
+          id: uuid(), sessao_id: sessaoId, total_entrevistados: Number(input.total_entrevistados), observacoes: String(input.observacoes ?? '').trim() || null,
+          print_call_path: path, registrado_por: staff.discord_id, registrado_em: nowIso(), discord_message_id: null, discord_status: null, editado_por: null, editado_em: null,
+        };
+        state.escRegs.push(reg);
+        s.status = 'concluida';
+        escLog('registro_criado', sessaoId, staff.discord_id, null, { total_entrevistados: reg.total_entrevistados, registro_id: reg.id });
+        const sent = state.escCfg.canal_discord_registros;
+        if (sent) Object.assign(reg, { discord_message_id: `mock-${reg.id}`, discord_status: `enviado em ${nowIso()}` });
+        save();
+        return ok({ registro: clone(reg), discord_error: sent ? null : ESC_DISCORD_ERRORS.noChannel });
+      });
+    },
+
+    async editInterviewRegistro(sessaoId, input = {}) {
+      return run('editInterviewRegistro', 'staff', async ({ staff, can }) => {
+        if (!can('escalas.gerenciar')) return validationError({ _: ESCALA_ERRORS.notDirection });
+        const reg = state.escRegs.find((r) => r.sessao_id === sessaoId);
+        if (!reg) return fail('NOT_FOUND', ESCALA_ERRORS.noRegistro);
+        const { valid, errors } = validateRegistroEdit(input);
+        if (!valid) return validationError(errors);
+        if (input.print) {
+          const file = validatePrintFile(input.print);
+          if (!file.valid) return validationError({ print: file.error });
+        }
+        const before = { total_entrevistados: reg.total_entrevistados, observacoes: reg.observacoes };
+        Object.assign(reg, { total_entrevistados: Number(input.total_entrevistados), observacoes: String(input.observacoes ?? '').trim() || null, editado_por: staff.discord_id, editado_em: nowIso() });
+        if (input.print) {
+          reg.print_call_path = `${sessaoId}/${uuid()}.${(input.print.type || 'image/png').split('/')[1].replace('jpeg', 'jpg')}`;
+          printFiles.set(reg.print_call_path, input.print);
+        }
+        escLog('registro_editado', sessaoId, staff.discord_id, before, { total_entrevistados: reg.total_entrevistados, observacoes: reg.observacoes });
+        save();
+        return ok(clone(reg));
+      });
+    },
+
+    async getInterviewPrintUrl(sessaoId) {
+      return run('getInterviewPrintUrl', 'staff', async ({ can }) => {
+        if (!escCanRead(can)) return fail('FORBIDDEN');
+        const reg = state.escRegs.find((r) => r.sessao_id === sessaoId);
+        if (!reg) return fail('NOT_FOUND', ESCALA_ERRORS.noRegistro);
+        return ok(printFiles.has(reg.print_call_path) ? `mock-print://${reg.print_call_path}` : null);
+      });
+    },
+
+    async sendInterviewRegistro(sessaoId, { resend = false } = {}) {
+      return run('sendInterviewRegistro', 'staff', async ({ can }) => {
+        if (!escCanRead(can)) return fail('FORBIDDEN');
+        const reg = state.escRegs.find((r) => r.sessao_id === sessaoId);
+        if (!reg) return fail('NOT_FOUND', ESC_DISCORD_ERRORS.noRegistro);
+        if (reg.discord_message_id && !(resend && can('escalas.gerenciar'))) return validationError({ _: DISCORD_SEND_ERRORS.alreadySent });
+        if (!state.escCfg.canal_discord_registros) return validationError({ _: ESC_DISCORD_ERRORS.noChannel });
+        Object.assign(reg, { discord_message_id: `mock-${reg.id}`, discord_status: `enviado em ${nowIso()}` });
+        save();
+        return ok({ discord_message_id: reg.discord_message_id, discord_status: reg.discord_status });
+      });
+    },
+
+    async sendInterviewNotice(sessaoId) {
+      return run('sendInterviewNotice', 'escalas.gerenciar', async ({ staff }) => {
+        const s = state.escSessoes.find((x) => x.id === sessaoId);
+        if (!s) return fail('NOT_FOUND', ESC_DISCORD_ERRORS.notFound);
+        if (s.aviso_enviado) return ok({ id: s.id, status: 'ja_avisada' });
+        if (!state.escCfg.canal_discord_avisos) return validationError({ _: ESC_DISCORD_ERRORS.noChannel });
+        Object.assign(s, { aviso_enviado: true, aviso_enviado_em: nowIso(), aviso_erro: null });
+        const people = state.escPart.filter((p) => p.sessao_id === s.id && p.presente);
+        escLog('aviso_enviado', s.id, staff.discord_id, null, { canal: 'ok', dm: { sent: people.length, failed: [] } });
+        save();
+        return ok({ id: s.id, status: 'avisada', dm: { sent: people.length, failed: [] } });
+      });
+    },
+
+    async listEscalaHistory({ limit = 100 } = {}) {
+      return run('listEscalaHistory', 'escalas.gerenciar', async () => ok(
+        [...state.escHist].reverse().slice(0, limit).map((h) => ({ ...clone(h), autor_nome: nameOf(h.discord_id) }))));
     },
 
     async listStaffNames() {

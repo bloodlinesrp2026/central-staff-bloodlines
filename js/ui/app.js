@@ -32,6 +32,8 @@ import { renderCharacter, renderCharacters } from './views/characters.js';
 import { renderProductivity } from './views/productivity.js';
 import { renderRules } from './views/rules.js';
 import { renderAgenda } from './views/agenda.js';
+import { renderEscalaSessao, renderEscalas } from './views/escalas.js';
+import { renderEscalasAdmin } from './views/escalas-admin.js';
 import { renderArea, renderAreas } from './views/areas.js';
 import { renderAreasAdmin } from './views/areas-admin.js';
 import { renderPerfil } from './views/perfil.js';
@@ -200,7 +202,7 @@ export function createApp(adapter, { isMock = false } = {}) {
     /** Re-renderiza a rota atual mantendo rolagem e foco (após mudança de dados). */
     render() {
       const route = router.route;
-      if (!state.ready || ['new', 'edit', 'permissions', 'evaluation', 'evaluations', 'announcements', 'proposal', 'alForm', 'interview', 'alHistory', 'alDetail', 'webhooks', 'gabarito', 'loreNames', 'characters', 'character', 'productivity', 'rules', 'agenda', 'areas', 'areasAdmin', 'area', 'perfil', 'diretoria'].includes(route.name)) return;
+      if (!state.ready || ['new', 'edit', 'permissions', 'evaluation', 'evaluations', 'announcements', 'proposal', 'alForm', 'interview', 'alHistory', 'alDetail', 'webhooks', 'gabarito', 'loreNames', 'characters', 'character', 'productivity', 'rules', 'agenda', 'escalas', 'escalasAdmin', 'escalaSessao', 'areas', 'areasAdmin', 'area', 'perfil', 'diretoria'].includes(route.name)) return;
       const key = document.activeElement?.dataset?.focusKey;
       const y = window.scrollY;
       showRoute(route, { navigated: false });
@@ -339,6 +341,9 @@ export function createApp(adapter, { isMock = false } = {}) {
       productivity: () => renderProductivity(app),
       rules: () => renderRules(app, route.slug ?? null),
       agenda: () => renderAgenda(app),
+      escalas: () => renderEscalas(app, route.slug ?? null),
+      escalasAdmin: () => renderEscalasAdmin(app, route.slug ?? null),
+      escalaSessao: () => renderEscalaSessao(app, route.slug),
       areas: () => renderAreas(app),
       areasAdmin: () => renderAreasAdmin(app),
       area: () => renderArea(app, route.slug),

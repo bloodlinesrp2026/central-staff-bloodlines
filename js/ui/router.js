@@ -34,6 +34,10 @@ const ROUTES = [
   ['rules', /^#\/regras(?:\/([0-9a-f-]{36}))?$/],
   // Agenda de Reuniões
   ['agenda', /^#\/agenda$/],
+  // Entrevistas: escala, agenda e registro (documento 13)
+  ['escalasAdmin', /^#\/entrevistas\/gestao(?:\/(configuracoes|historico))?$/],
+  ['escalaSessao', /^#\/entrevistas\/sessao\/([0-9a-f-]{36})$/],
+  ['escalas', /^#\/entrevistas(?:\/(agenda|disponibilidade))?$/],
   // Áreas da Staff
   ['areas', /^#\/areas$/],
   ['areasAdmin', /^#\/areas\/gerenciar$/],

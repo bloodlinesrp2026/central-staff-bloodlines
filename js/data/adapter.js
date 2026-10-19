@@ -411,6 +411,42 @@
  *           failed: string[] }, registrado: boolean }>} sendEvaluationReminder    avaliacoes.gerenciar. Privado pelo bot (Edge Function, ação
  *           lembrete_avaliacao): abertura = todos que avaliam; pendentes = quem ainda não enviou nenhuma. Período encerrado é recusado.
  *
+ * Entrevistas: escala, agenda e registro (24_escalas.sql; regras em js/core/escalas.js). Ler: allowlist.avaliar ou escalas.gerenciar.
+ * Direção (escalas.gerenciar): configurar, abrir, analisar, publicar, realocar, editar registro, histórico. Erros de regra = VALIDATION em
+ * details.errors._ com ESCALA_ERRORS. Discord: Edge Function (ações publicar_escala_discord, enviar_aviso_entrevista, enviar_registro_discord);
+ * falha do Discord nunca desfaz o que já foi salvo (vem em discord_error).
+ * @property {() => Result<object>} getEscalaConfig    Configuração (dias, horários, antecedência, canais e cargos do Discord, mensagem de copiar).
+ * @property {(c: object) => Result<object>} saveEscalaConfig    escalas.gerenciar. VALIDATION por campo.
+ * @property {(id?: string) => Result<{ escala: object|null, slots: object[], minha_disponibilidade: object[], respondi: boolean }>} getEscala
+ *           Sem id: a escala em andamento (escala null se não há). Com id: aquela escala (NOT_FOUND se não existe).
+ * @property {() => Result<object[]>} listEscalas    escalas.gerenciar. Todas, mais recentes primeiro, com slots_total e sessoes_total.
+ * @property {(e: { periodo_inicio: string, periodo_fim: string, encerramento: string }) => Result<object>} openEscala    escalas.gerenciar.
+ *           Só uma escala em andamento por vez (ESCALA_ERRORS.active).
+ * @property {(escalaId: string) => Result<{ membros: object[], celulas: object[] }>} getAvailabilitySummary    escalas.gerenciar.
+ * @property {(escalaId: string, slots: Array<{ dia_semana: number, horario: string }>) => Result<{ total: number }>} saveMyAvailability
+ *           Quem faz entrevista (allowlist.avaliar), enquanto a escala está aberta e dentro do prazo. Substitui o que já enviou.
+ * @property {(escalaId: string) => Result<object>} closeAvailability    escalas.gerenciar. Aberta → em análise.
+ * @property {(escalaId: string, slots: object[]) => Result<{ total: number }>} saveEscalaSlots    escalas.gerenciar. Só em análise; substitui o rascunho.
+ * @property {(escalaId: string) => Result<{ escala: object, sessoes: number, discord_error: string|null }>} publishEscala    escalas.gerenciar.
+ *           Em análise → publicada; gera as sessões futuras (sem duplicar) e manda a escala ao Discord.
+ * @property {(escalaId: string) => Result<{ discord_status: string, discord_message_id: string|null }>} sendEscalaToDiscord    escalas.gerenciar. Manda (de novo) a
+ *           escala publicada ao canal da escala. DISCORD_SEND_ERRORS / ESC_DISCORD_ERRORS em VALIDATION se o canal ou o bot faltam.
+ * @property {(escalaId: string) => Result<null>} endEscala    escalas.gerenciar.
+ * @property {(slotId: string, novoId: string) => Result<null>} reallocateSlot    escalas.gerenciar. Só em escala publicada; as sessões futuras sem registro acompanham.
+ * @property {(r?: { from?: string, to?: string }) => Result<object[]>} listInterviewSessions    Sessões (AAAA-MM-DD) com participantes, tem_registro e view.
+ * @property {(id: string) => Result<object>} getInterviewSession    Sessão + registro + histórico (histórico só para a Direção e quem está na sessão).
+ * @property {(id: string, status: 'em_andamento'|'cancelada') => Result<object>} setInterviewSessionStatus    Iniciar: quem está na sessão ou a Direção. Cancelar: Direção.
+ * @property {(sessaoId: string, s: { original: string, substituto: string, motivo?: string }) => Result<object>} registerSubstitution    Quem está na sessão ou a Direção.
+ * @property {(sessaoId: string, discordId: string) => Result<object>} registerAbsence    Quem está na sessão ou a Direção.
+ * @property {(sessaoId: string, r: object) => Result<{ registro: object, discord_error: string|null }>} registerInterview    Quem está na sessão ou a
+ *           Direção. Um registro por sessão (ESCALA_ERRORS.registered). `print` obrigatório: { name, type, size, blob? }. Concluída a sessão.
+ * @property {(sessaoId: string, r: object) => Result<object>} editInterviewRegistro    Só a Direção (ESCALA_ERRORS.notDirection para os outros).
+ * @property {(sessaoId: string) => Result<string|null>} getInterviewPrintUrl    Endereço temporário do print da call.
+ * @property {(sessaoId: string, o?: { resend?: boolean }) => Result<{ discord_message_id: string|null, discord_status: string }>} sendInterviewRegistro
+ *           Reenvia o registro ao canal de registros (reenviar depois de enviado: só a Direção).
+ * @property {(sessaoId: string) => Result<object>} sendInterviewNotice    escalas.gerenciar. Aviso na hora (canal e privado), uma vez só.
+ * @property {(o?: { limit?: number }) => Result<object[]>} listEscalaHistory    escalas.gerenciar. Histórico de auditoria, mais recente primeiro.
+ *
  * Etapa 10 · produtividade (13_produtividade.sql; conta em js/core/productivity.js)
  * @property {(p: { from: string, to: string }) => Result<Productivity>} getProductivity   produtividade.ver. to exclusivo.
  * @property {() => Result<Array<{ discord_id: string, display_name: string }>>} listStaffNames   Staff: nomes de toda a equipe.
@@ -452,6 +488,10 @@ export const ADAPTER_METHODS = Object.freeze([
   'getEvaluationsByArea', 'listReceivedEvaluations', 'callAlignment', 'listAlignments',
   'listEvaluationDecisions', 'registerEvaluationDecision', 'getEvaluationCoverage', 'listEvaluationReminders', 'sendEvaluationReminder',
   'getProductivity', 'listStaffNames',
+  'getEscalaConfig', 'saveEscalaConfig', 'getEscala', 'listEscalas', 'openEscala', 'getAvailabilitySummary', 'saveMyAvailability', 'closeAvailability',
+  'saveEscalaSlots', 'publishEscala', 'sendEscalaToDiscord', 'endEscala', 'reallocateSlot', 'listInterviewSessions', 'getInterviewSession', 'setInterviewSessionStatus',
+  'registerSubstitution', 'registerAbsence', 'registerInterview', 'editInterviewRegistro', 'getInterviewPrintUrl', 'sendInterviewRegistro',
+  'sendInterviewNotice', 'listEscalaHistory',
 ]);
 
 /** Campos da análise que o cliente pode definir (o resto é do servidor). */
@@ -516,7 +556,7 @@ export const WEBHOOK_COLUMNS = Object.freeze([
 ]);
 
 /** Módulos que o banco pode ter (Staff.features). */
-export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'lore', 'perfil', 'produtividade', 'regras']);
+export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'escalas', 'lore', 'perfil', 'produtividade', 'regras']);
 
 /** Campos que o cliente pode definir. Todo o resto é do servidor. */
 export const EDITABLE_FIELDS = Object.freeze([
