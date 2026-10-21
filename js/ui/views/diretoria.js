@@ -14,6 +14,7 @@ import { debounce, downloadText, h, icon, toast } from '../dom.js';
 import { formatDate, roleBadge } from '../components.js';
 import { openDialog } from '../modal.js';
 import { attachFormDraft } from '../draft.js';
+import { canDestroy, runDestructive } from '../destructive.js';
 import { renderRichMarkdownInto } from '../../core/render-md.js';
 import { ROLE_LIST, assignableRoles, canManageRole, roleLabel, roleLevel } from '../../core/permissions.js';
 import { initialsOf, safeAvatar } from '../../core/perfil.js';
@@ -817,6 +818,7 @@ export function renderDiretoria(app, slug = null, memberId = null) {
   /* ================================================================ Ocorrências */
   function drawOccurrences() {
     const f = ctx.occ;
+    const erasable = canDestroy(app, 'ocorrencias.apagar');
     const list = ctx.occurrences.filter((o) => (!f.tipo || o.tipo === f.tipo) && (!f.membro || o.membro_id === f.membro) && within(o.feito_em, f.days));
     const people = [...new Set(ctx.occurrences.map((o) => o.membro_id))].map((id) => [id, nameOf(id)]).sort((a, b) => a[1].localeCompare(b[1], 'pt-BR'));
     const sel = (id, value, pairs, k) => h('select', { class: 'input input--sm', id, onchange: (e) => { f[k] = e.target.value; drawOccurrences(); } }, options(pairs, value));
@@ -841,7 +843,17 @@ export function renderDiretoria(app, slug = null, memberId = null) {
                   ? h('a', { href: `#/perfil/${o.membro_id}`, target: '_blank', rel: 'noopener' }, o.membro_nome ?? nameOf(o.membro_id))
                   : (o.membro_nome ?? nameOf(o.membro_id))),
               h('p', { class: 'dir-occ-text' }, o.descricao),
-              h('p', { class: 'dir-occ-meta' }, `${formatDate(o.feito_em, { time: true })} · registrada por ${o.feito_por_nome ?? nameOf(o.feito_por)}`)));
+              h('p', { class: 'dir-occ-meta' }, `${formatDate(o.feito_em, { time: true })} · registrada por ${o.feito_por_nome ?? nameOf(o.feito_por)}`)),
+            erasable && h('button', {
+              type: 'button', class: 'btn btn--sm btn--ghost btn--danger', dataset: { action: 'erase-occurrence' }, 'data-requires-online': '',
+              'aria-label': `Apagar a ocorrência de ${o.membro_nome ?? nameOf(o.membro_id)}`,
+              onclick: () => runDestructive(app, 'occurrence', {
+                detail: h('div', {}, h('p', {}, h('strong', {}, `${occurrenceLabel(o.tipo)} · ${o.membro_nome ?? nameOf(o.membro_id)}`)), h('p', { class: 'pre-wrap' }, o.descricao)),
+                call: (reason) => app.adapter.deleteOccurrence(o.id, reason),
+                okMessage: 'Ocorrência apagada. O texto ficou guardado na auditoria.',
+                onDone: () => refresh({ occurrences: true }),
+              }),
+            }, icon('trash'), 'Apagar'));
         }))
         : h('p', { class: 'panel-text' }, 'Nenhuma ocorrência com esses filtros.'));
   }
@@ -1050,6 +1062,20 @@ export function renderDiretoria(app, slug = null, memberId = null) {
 
     const pages = Math.max(1, Math.ceil(hist.data.total / ALIGN_PAGE));
     const go = (page) => { f.page = page; drawAlignments(); };
+    const cancellable = canDestroy(app, 'alinhamentos.apagar');
+    const showSituation = cancellable || hist.data.items.some((x) => x.cancelado_em);
+    const situation = (x) => (x.cancelado_em
+      ? h('span', { class: 'dir-down', title: x.cancelado_motivo ?? '' }, `Cancelado em ${ddmm(x.cancelado_em)}`)
+      : cancellable && h('button', {
+        type: 'button', class: 'btn btn--sm btn--ghost btn--danger', dataset: { action: 'cancel-alignment' }, 'data-requires-online': '',
+        'aria-label': `Cancelar o alinhamento de ${x.membro_nome ?? x.membro_id}`,
+        onclick: () => runDestructive(app, 'alignment', {
+          detail: h('div', {}, h('p', {}, h('strong', {}, x.membro_nome ?? x.membro_id)), h('p', { class: 'pre-wrap' }, x.mensagem)),
+          call: (reason) => app.adapter.cancelAlignment(x.id, reason),
+          okMessage: 'Alinhamento cancelado.',
+          onDone: () => drawAlignments(),
+        }),
+      }, icon('x'), 'Cancelar'));
     const status = (st, erro) => (st ? h('span', { class: st === 'ok' ? 'dir-up' : 'dir-down', title: erro ?? '' }, STATUS_TEXT[st]) : h('span', { class: 'dir-muted' }, '–'));
     panel.replaceChildren(
       section('dir-al-title', 'Chamar para alinhamento', 'message-circle',
@@ -1057,7 +1083,7 @@ export function renderDiretoria(app, slug = null, memberId = null) {
         form),
       section('dir-al-hist-title', 'Alinhamentos chamados', 'history',
         table('dir-al-table', 'Alinhamentos chamados',
-          ['Membro', 'Prazo', 'Mensagem', 'Privado', 'Canal', 'Agenda', 'Chamado por', 'Quando'].map((t) => h('th', { scope: 'col' }, t)),
+          ['Membro', 'Prazo', 'Mensagem', 'Privado', 'Canal', 'Agenda', 'Chamado por', 'Quando', ...(showSituation ? ['Situação'] : [])].map((t) => h('th', { scope: 'col' }, t)),
           hist.data.items.map((x) => h('tr', {},
             h('td', {}, profileLink(x.membro_id, x.membro_nome ?? x.membro_id)),
             h('td', {}, alignmentDeadline(x.prazo)?.label ?? x.prazo, x.prazo_em ? h('span', { class: 'dir-comment' }, `até ${ddmm(x.prazo_em)}`) : null),
@@ -1065,7 +1091,8 @@ export function renderDiretoria(app, slug = null, memberId = null) {
             h('td', {}, status(x.dm_status, x.dm_erro)), h('td', {}, status(x.canal_status, x.canal_erro)),
             h('td', {}, x.reuniao_id ? h('a', { href: '#/agenda' }, 'Na Agenda') : '–'),
             h('td', {}, x.chamado_por_nome ?? x.chamado_por),
-            h('td', {}, formatDate(x.criado_em, { time: true })))), 'Nenhum alinhamento chamado ainda.'),
+            h('td', {}, formatDate(x.criado_em, { time: true })),
+            showSituation && h('td', {}, situation(x) || '–'))), 'Nenhum alinhamento chamado ainda.'),
         pages > 1 && h('div', { class: 'dir-pager', id: 'dir-al-pager' },
           h('button', { type: 'button', class: 'btn btn--sm', disabled: f.page === 0 ? true : null, onclick: () => go(f.page - 1) }, '‹ Página anterior'),
           h('span', { class: 'dir-pager-info' }, `Página ${f.page + 1} de ${pages}`),

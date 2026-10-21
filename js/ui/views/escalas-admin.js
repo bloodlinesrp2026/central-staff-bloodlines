@@ -10,6 +10,7 @@ import {
 import { formField, showFieldErrors } from './gabarito.js';
 import { renderMessage } from './message.js';
 import { countdownText, scheduleTable } from './escalas.js';
+import { canDestroy, runDestructive } from '../destructive.js';
 
 const TABS = Object.freeze([['escala', 'Escala', '#/entrevistas/gestao'], ['configuracoes', 'Configurações', '#/entrevistas/gestao/configuracoes'], ['historico', 'Histórico', '#/entrevistas/gestao/historico']]);
 const addDays = (date, n) => new Date(Date.parse(`${date}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
@@ -248,6 +249,7 @@ export function renderEscalasAdmin(app, tabKey) {
     const days = sortDays(config.dias_semana);
     const times = sortHorarios(config.horarios);
     const cells = slotsByCell(slots);
+    const canEndEscala = app.feature('apagar') ? app.can('escalas.cancelar') : app.can('escalas.gerenciar');
     const eligiblePromise = app.adapter.getAvailabilitySummary(escala.id);
     const personChip = (s) => h('span', { class: `esc-person esc-person--${s.funcao}`, dataset: { id: s.discord_id, slot: s.id } },
       `${s.display_name || s.discord_id} (${s.funcao === 'suporte' ? 'sup' : 'all'})`, ' ',
@@ -281,14 +283,12 @@ export function renderEscalasAdmin(app, tabKey) {
           await drawPanel();
         } }, icon('send'), 'Reenviar ao Discord'),
         h('a', { class: 'btn btn--ghost', href: '#/entrevistas/gestao/historico' }, icon('history'), 'Ver escalas anteriores'),
-        h('button', { type: 'button', class: 'btn btn--danger', id: 'esc-end', 'data-requires-online': '', onclick: async () => {
-          const go = await confirmDialog({ title: 'Encerrar a escala?', message: 'A escala deixa de estar ativa e você poderá abrir uma nova. As sessões já criadas continuam na agenda.', confirmLabel: 'Encerrar escala', danger: true });
-          if (!go) return;
-          const r = await app.adapter.endEscala(escala.id);
-          if (r.error) { failure('Não foi possível encerrar', r.error); return; }
-          toast('Escala encerrada.');
-          await drawPanel();
-        } }, icon('lock'), 'Encerrar escala'))));
+        canEndEscala && h('button', { type: 'button', class: 'btn btn--danger', id: 'esc-end', 'data-requires-online': '', onclick: () => runDestructive(app, 'escala', {
+          detail: h('p', {}, h('strong', {}, `Escala ${formatDateBr(escala.periodo_inicio)} a ${formatDateBr(escala.periodo_fim)}`), ` · ${cells.size} horário(s) na grade`),
+          call: (reason) => app.adapter.endEscala(escala.id, reason),
+          okMessage: 'Escala encerrada.',
+          onDone: () => drawPanel(),
+        }) }, icon('lock'), 'Encerrar escala'))));
   }
 
   /* ---------------------------------------------------------------------------
@@ -328,7 +328,17 @@ export function renderEscalasAdmin(app, tabKey) {
       h('div', { class: 'staff-form-grid' }, fields.canal_discord_escala.el, fields.canal_discord_registros.el, fields.canal_discord_avisos.el),
       h('div', { class: 'staff-form-grid' }, fields.cargo_discord_entrevistador.el, fields.cargo_discord_suporte.el),
       h('div', { class: 'staff-form-grid' }, fields.mensagem_link_call.el, fields.mensagem_cargo_id.el), general,
-      h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'btn btn--primary', id: 'esc-cfg-save', 'data-requires-online': '' }, icon('device-floppy'), 'Salvar configurações')));
+      h('div', { class: 'form-actions' },
+        h('button', { type: 'submit', class: 'btn btn--primary', id: 'esc-cfg-save', 'data-requires-online': '' }, icon('device-floppy'), 'Salvar configurações'),
+        canDestroy(app, 'escalas.redefinir') && h('button', {
+          type: 'button', class: 'btn btn--ghost btn--danger', id: 'esc-cfg-reset', 'data-requires-online': '',
+          onclick: () => runDestructive(app, 'config', {
+            detail: h('p', {}, `Agora: ${sortHorarios(config.horarios).map(horarioLabel).join(', ')} · ${config.dias_semana.length} dia(s) por semana · aviso ${config.antecedencia_aviso_minutos} min antes`),
+            call: (reason) => app.adapter.resetEscalaConfig(reason),
+            okMessage: 'Configurações redefinidas ao padrão.',
+            onDone: (res) => { config = res.data; drawConfig(); },
+          }),
+        }, icon('restore'), 'Redefinir ao padrão')));
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const input = pickEscalaConfig({

@@ -431,7 +431,7 @@
  *           Em análise → publicada; gera as sessões futuras (sem duplicar) e manda a escala ao Discord.
  * @property {(escalaId: string) => Result<{ discord_status: string, discord_message_id: string|null }>} sendEscalaToDiscord    escalas.gerenciar. Manda (de novo) a
  *           escala publicada ao canal da escala. DISCORD_SEND_ERRORS / ESC_DISCORD_ERRORS em VALIDATION se o canal ou o bot faltam.
- * @property {(escalaId: string) => Result<null>} endEscala    escalas.gerenciar.
+ * @property {(escalaId: string, reason?: string) => Result<null>} endEscala    escalas.cancelar (escalas.gerenciar no banco antigo). Motivo só com o SQL 25.
  * @property {(slotId: string, novoId: string) => Result<null>} reallocateSlot    escalas.gerenciar. Só em escala publicada; as sessões futuras sem registro acompanham.
  * @property {(r?: { from?: string, to?: string }) => Result<object[]>} listInterviewSessions    Sessões (AAAA-MM-DD) com participantes, tem_registro e view.
  * @property {(id: string) => Result<object>} getInterviewSession    Sessão + registro + histórico (histórico só para a Direção e quem está na sessão).
@@ -446,6 +446,19 @@
  *           Reenvia o registro ao canal de registros (reenviar depois de enviado: só a Direção).
  * @property {(sessaoId: string) => Result<object>} sendInterviewNotice    escalas.gerenciar. Aviso na hora (canal e privado), uma vez só.
  * @property {(o?: { limit?: number }) => Result<object[]>} listEscalaHistory    escalas.gerenciar. Histórico de auditoria, mais recente primeiro.
+ *
+ * Documento 14 · apagar, remover, cancelar e redefinir com auditoria (25_apagar_auditoria.sql; regras em js/core/apagar.js).
+ * Todas exigem a feature 'apagar' (SQL 25) e a permissão do nome; "reason" é o motivo opcional (até 300 caracteres, sem emojis) e vai para a
+ * auditoria junto com quem, cargo e o conteúdo que existia. FORBIDDEN sem a permissão; NOT_FOUND se não existe; VALIDATION nas travas.
+ * @property {(id: string, reason?: string) => Result<null>} deleteCharacter    personagens.apagar. Marca como removido e libera o nome (some da lista).
+ * @property {(id: string, reason?: string) => Result<{ session: object, dm: { sent: number, failed: string[] }|null, discord_error: string|null }>} cancelInterviewSession
+ *           escalas.cancelar (escalas.gerenciar no banco antigo). Cancela a sessão e avisa no privado os outros escalados.
+ * @property {(reason?: string) => Result<object>} resetEscalaConfig    escalas.redefinir. Dias, horários, antecedência e mensagem voltam ao padrão; canais e cargos ficam.
+ * @property {(id: string, reason?: string) => Result<null>} eraseEvaluation    avaliacoes.apagar. Só enviada ou arquivada; o conteúdo completo vai para a auditoria.
+ * @property {(id: string, reason?: string) => Result<null>} deleteOccurrence    ocorrencias.apagar. O texto completo vai para a auditoria.
+ * @property {(id: string, reason?: string) => Result<null>} cancelAlignment    alinhamentos.apagar. Marca como cancelado (VALIDATION se já cancelado ou já aconteceu).
+ * @property {(id: string, reason?: string) => Result<null>} deleteInterviewQuestion    gabarito.apagar. Apaga a pergunta; as análises antigas guardam a cópia do texto.
+ * @property {(id: string, reason?: string) => Result<null>} deleteChecklistItem    gabarito.apagar.
  *
  * Etapa 10 · produtividade (13_produtividade.sql; conta em js/core/productivity.js)
  * @property {(p: { from: string, to: string }) => Result<Productivity>} getProductivity   produtividade.ver. to exclusivo.
@@ -492,6 +505,8 @@ export const ADAPTER_METHODS = Object.freeze([
   'saveEscalaSlots', 'publishEscala', 'sendEscalaToDiscord', 'endEscala', 'reallocateSlot', 'listInterviewSessions', 'getInterviewSession', 'setInterviewSessionStatus',
   'registerSubstitution', 'registerAbsence', 'registerInterview', 'editInterviewRegistro', 'getInterviewPrintUrl', 'sendInterviewRegistro',
   'sendInterviewNotice', 'listEscalaHistory',
+  'deleteCharacter', 'cancelInterviewSession', 'resetEscalaConfig', 'eraseEvaluation', 'deleteOccurrence', 'cancelAlignment',
+  'deleteInterviewQuestion', 'deleteChecklistItem',
 ]);
 
 /** Campos da análise que o cliente pode definir (o resto é do servidor). */
@@ -556,7 +571,7 @@ export const WEBHOOK_COLUMNS = Object.freeze([
 ]);
 
 /** Módulos que o banco pode ter (Staff.features). */
-export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'escalas', 'lore', 'perfil', 'produtividade', 'regras']);
+export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'apagar', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'escalas', 'lore', 'perfil', 'produtividade', 'regras']);
 
 /** Campos que o cliente pode definir. Todo o resto é do servidor. */
 export const EDITABLE_FIELDS = Object.freeze([

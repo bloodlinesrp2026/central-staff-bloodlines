@@ -70,6 +70,14 @@ export const PERMISSIONS = Object.freeze([
   { code: 'diretoria.avaliacoes', description: 'Abrir a aba Avaliações do Painel da Diretoria: médias por área e avaliações do Head Staff', roles: FROM_HEAD },
   { code: 'alinhamento.chamar', description: 'Chamar membros para alinhamento pelo bot (privado, canal e Agenda)', roles: DIRECTION },
   { code: 'escalas.gerenciar', description: 'Gerenciar a escala das entrevistas: abrir, analisar, publicar, realocar, configurar e editar registros', roles: DIRECTION },
+  // Documento 14 · apagar, remover, cancelar e redefinir com auditoria (SQL 25). "Administrador+" = manager; "Resp. Equipe+" = admin e manager.
+  { code: 'personagens.apagar', description: 'Remover personagens da lista de personagens em uso', roles: ['manager'] },
+  { code: 'escalas.cancelar', description: 'Cancelar sessões agendadas e fechar a escala das entrevistas', roles: DIRECTION },
+  { code: 'escalas.redefinir', description: 'Redefinir as configurações das entrevistas ao padrão', roles: ['manager'] },
+  { code: 'avaliacoes.apagar', description: 'Apagar avaliações enviadas do Head Staff (o conteúdo fica na auditoria)', roles: [] },
+  { code: 'ocorrencias.apagar', description: 'Apagar ocorrências do Painel da Diretoria (o texto fica na auditoria)', roles: [] },
+  { code: 'gabarito.apagar', description: 'Apagar perguntas do gabarito e itens do checklist da entrevista', roles: [] },
+  { code: 'alinhamentos.apagar', description: 'Cancelar alinhamentos chamados no Painel da Diretoria', roles: ['manager'] },
 ].map((p) => Object.freeze({ ceoOnly: false, ...p, roles: Object.freeze([...p.roles]) })));
 
 export const PERMISSION_CODES = Object.freeze(PERMISSIONS.map((p) => p.code));

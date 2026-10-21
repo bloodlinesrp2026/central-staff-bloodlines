@@ -12,6 +12,7 @@ import {
   meetingList, meetingRecipients, validateDiscordRoleIds, normalizeName, printError, sentStatus, validateAlEvaluation, validateAlExtras, validateAreaMessage,
   validateWebhook, EVALUATION_REMINDER_ERRORS, EVALUATION_REMINDER_KINDS, evaluationReminderRecipients,
 } from '../core/allowlist.js';
+import { APAGAR_ERRORS, validateReason } from '../core/apagar.js';
 import {
   EVALUATION_DECISION_ERRORS, criteriaNotesError, decisionTargetError, justificationError, pickCriterion, resolvedAction, validateDecision,
 } from '../core/avaliacoes.js';
@@ -257,6 +258,14 @@ export function createMockAdapter({
   };
   const escIsParticipant = (sessaoId, discordId) => state.escPart.some((p) => p.sessao_id === sessaoId && p.discord_id === discordId && p.presente);
   const escTimeKey = (horario) => horarioSortKey(horario);
+  const ESC_CONFIG_KEYS = ['dias_semana', 'horarios', 'antecedencia_aviso_minutos', 'canal_discord_escala', 'canal_discord_registros',
+    'canal_discord_avisos', 'cargo_discord_entrevistador', 'cargo_discord_suporte', 'mensagem_link_call', 'mensagem_cargo_id'];
+  /** Só o que mudou (kb_audit_entrevistas_configuracao): { before, after } ou null se nada mudou. */
+  function escConfigDiff(from, to) {
+    const keys = ESC_CONFIG_KEYS.filter((k) => JSON.stringify(from[k] ?? null) !== JSON.stringify(to[k] ?? null));
+    if (!keys.length) return null;
+    return { before: Object.fromEntries(keys.map((k) => [k, clone(from[k] ?? null)])), after: Object.fromEntries(keys.map((k) => [k, clone(to[k] ?? null)])) };
+  }
   const escLog = (tipo, ref, actor, antes, depois) => state.escHist.push({
     id: state.escHist.length + 1, tipo, referencia_id: ref, discord_id: actor ?? 'sistema', dados_anteriores: antes ?? null, dados_novos: depois ?? null, criado_em: nowIso(),
   });
@@ -339,6 +348,16 @@ export function createMockAdapter({
       id: state.audit.length + 1, at: nowIso(), actor: actor?.discord_id ?? 'sistema',
       entity, entity_id: String(entityId), action, before: before ?? null, after: after ?? null,
     });
+  }
+
+  /** Documento 14 (kb_audit_apagar): before = como era; after = cargo de quem fez e o motivo. */
+  function auditApagar(actor, entity, entityId, action, before, reason, extra = {}) {
+    audit(actor, entity, entityId, action, before, { cargo: actor?.role ?? null, motivo: reason ?? null, ...extra });
+  }
+  /** Motivo opcional do apagar (kb_apagar_motivo). Devolve { reason } ou { error } já no formato do contrato. */
+  function reasonOf(text) {
+    const check = validateReason(text);
+    return check.valid ? { reason: check.reason } : { error: validationError({ _: check.error }) };
   }
 
   const newestFirst = (a, b) => b.created_at.localeCompare(a.created_at);
@@ -976,6 +995,22 @@ export function createMockAdapter({
       });
     },
 
+    async eraseEvaluation(id, reason) {
+      return run('eraseEvaluation', 'avaliacoes.apagar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        const idx = state.evaluations.findIndex((e) => e.id === id);
+        if (idx < 0) return fail('NOT_FOUND', APAGAR_ERRORS.evaluation);
+        if (state.evaluations[idx].status === 'rascunho') return validationError({ _: APAGAR_ERRORS.evaluationDraft });
+        const [row] = state.evaluations.splice(idx, 1);
+        const decisoes = (state.evalDecisions ?? []).filter((d) => d.evaluation_id === id);
+        state.evalDecisions = (state.evalDecisions ?? []).filter((d) => d.evaluation_id !== id);
+        auditApagar(staff, 'avaliacao', id, 'apagada', { ...clone(row), decisoes: clone(decisoes) }, r.reason);
+        save();
+        return ok(null);
+      });
+    },
+
     /* ----- Plano 12: decisões da Direção, cobertura e lembretes ----- */
     async listEvaluationDecisions() {
       // Ao contrário da ordem de gravação antes de ordenar: no mesmo milissegundo, a mais recente vem primeiro.
@@ -1319,7 +1354,39 @@ export function createMockAdapter({
 
     async saveChecklistItem(input = {}) {
       return run('saveChecklistItem', 'lore.gerenciar', async ({ staff }) => saveConfig(staff, state.checklistItems, input,
-        CHECKLIST_FIELDS, validateChecklistItem, { hint: '', active: true }));
+        CHECKLIST_FIELDS, validateChecklistItem, { hint: '', active: true }, (row, before) => {
+          if (!before || before.text !== row.text || before.active !== row.active) {
+            audit(staff, 'checklist', row.id, !before ? 'cadastrado' : before.active !== row.active ? (row.active ? 'ativado' : 'desativado') : 'alterado',
+              before && { text: before.text, active: before.active }, { text: row.text, active: row.active });
+          }
+        }));
+    },
+
+    async deleteInterviewQuestion(id, reason) {
+      return run('deleteInterviewQuestion', 'gabarito.apagar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        const idx = state.questions.findIndex((q) => q.id === id);
+        if (idx < 0) return fail('NOT_FOUND', APAGAR_ERRORS.question);
+        const [row] = state.questions.splice(idx, 1);
+        for (const a of state.alAnswers) if (a.question_id === id) a.question_id = null;
+        auditApagar(staff, 'pergunta', id, 'apagada', clone(row), r.reason);
+        save();
+        return ok(null);
+      });
+    },
+
+    async deleteChecklistItem(id, reason) {
+      return run('deleteChecklistItem', 'gabarito.apagar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        const idx = state.checklistItems.findIndex((c) => c.id === id);
+        if (idx < 0) return fail('NOT_FOUND', APAGAR_ERRORS.item);
+        const [row] = state.checklistItems.splice(idx, 1);
+        auditApagar(staff, 'checklist', id, 'apagado', clone(row), r.reason);
+        save();
+        return ok(null);
+      });
     },
 
     async saveBlockedName(input = {}) {
@@ -1404,6 +1471,28 @@ export function createMockAdapter({
         syncCharacterName(target, staff);
         save();
         return ok(presentCharacter(target));
+      });
+    },
+
+    async deleteCharacter(id, reason) {
+      return run('deleteCharacter', 'personagens.apagar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        const row = state.characters.find((c) => c.id === id);
+        if (!row) return fail('NOT_FOUND', APAGAR_ERRORS.character);
+        const before = {
+          character_name: row.character_name, discord_name: row.discord_name, discord_id: row.discord_id, city_id: row.city_id, status: row.status,
+          photo_path: row.photo_path ?? null, version: row.version, created_by: row.created_by, created_at: row.created_at,
+          anotacoes: state.characterNotes.filter((n) => n.character_id === id).length,
+          alteracoes: state.characterRevisions.filter((x) => x.character_id === id).length,
+        };
+        // "Liberado" solta o nome e o ID da Cidade e desativa o nome proibido; depois o personagem sai da lista.
+        Object.assign(row, { status: 'liberado', version: row.version + 1, updated_by: staff.discord_id, updated_at: nowIso() });
+        syncCharacterName(row, staff);
+        state.characters = state.characters.filter((c) => c.id !== id);
+        auditApagar(staff, 'personagem', id, 'removido', before, r.reason);
+        save();
+        return ok(null);
       });
     },
 
@@ -1989,6 +2078,19 @@ export function createMockAdapter({
         .sort((a, b) => b.feito_em.localeCompare(a.feito_em))));
     },
 
+    async deleteOccurrence(id, reason) {
+      return run('deleteOccurrence', 'ocorrencias.apagar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        const idx = state.occurrences.findIndex((o) => o.id === id);
+        if (idx < 0) return fail('NOT_FOUND', APAGAR_ERRORS.occurrence);
+        const [row] = state.occurrences.splice(idx, 1);
+        auditApagar(staff, 'ocorrencia', id, 'apagada', clone(row), r.reason);
+        save();
+        return ok(null);
+      });
+    },
+
     async saveOccurrence(input = {}) {
       return run('saveOccurrence', 'diretoria.ver', async ({ staff }) => {
         const next = { membro_id: String(input?.membro_id ?? '').trim(), tipo: String(input?.tipo ?? ''), descricao: String(input?.descricao ?? '').trim() };
@@ -2157,6 +2259,25 @@ export function createMockAdapter({
       });
     },
 
+    async cancelAlignment(id, reason) {
+      return run('cancelAlignment', 'alinhamentos.apagar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        const row = (state.alignments ?? []).find((x) => x.id === id);
+        if (!row) return fail('NOT_FOUND', APAGAR_ERRORS.alignment);
+        if (row.cancelado_em) return validationError({ _: APAGAR_ERRORS.alignmentCancelled });
+        const meeting = row.reuniao_id ? state.meetings.find((m) => m.id === row.reuniao_id) : null;
+        if (['em_andamento', 'concluida'].includes(meeting?.status)) return validationError({ _: APAGAR_ERRORS.alignmentHappened });
+        Object.assign(row, { cancelado_em: nowIso(), cancelado_por: staff.discord_id, cancelado_motivo: r.reason });
+        auditApagar(staff, 'alinhamento', id, 'cancelado', {
+          membro_id: row.membro_id, membro_nome: row.membro_nome, mensagem: row.mensagem, prazo: row.prazo, prazo_em: row.prazo_em,
+          reuniao_id: row.reuniao_id, chamado_por: row.chamado_por, criado_em: row.criado_em,
+        }, r.reason);
+        save();
+        return ok(null);
+      });
+    },
+
     async listAlignments({ limit = 20, offset = 0 } = {}) {
       return run('listAlignments', 'alinhamento.chamar', async () => {
         const all = [...(state.alignments ?? [])].sort((a, b) => b.criado_em.localeCompare(a.criado_em));
@@ -2236,7 +2357,24 @@ export function createMockAdapter({
         const next = { ...state.escCfg, ...pickEscalaConfig(input) };
         const { valid, errors } = validateEscalaConfig(next);
         if (!valid) return validationError(errors);
+        const diff = escConfigDiff(state.escCfg, next);
         state.escCfg = { ...next, atualizado_por: staff.discord_id, atualizado_em: nowIso() };
+        if (diff) auditApagar(staff, 'configuracao_entrevistas', '1', 'alterada', diff.before, null, { novo: diff.after });
+        save();
+        return ok(clone(state.escCfg));
+      });
+    },
+
+    async resetEscalaConfig(reason) {
+      return run('resetEscalaConfig', 'escalas.redefinir', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        // Canais e cargos do Discord ficam como estão; o resto volta ao padrão (redefinir_configuracao_entrevistas, SQL 25).
+        const { dias_semana, horarios, antecedencia_aviso_minutos, mensagem_link_call, mensagem_cargo_id } = DEFAULT_ESCALA_CONFIG;
+        const next = { ...state.escCfg, dias_semana: [...dias_semana], horarios: [...horarios], antecedencia_aviso_minutos, mensagem_link_call, mensagem_cargo_id };
+        const diff = escConfigDiff(state.escCfg, next);
+        state.escCfg = { ...next, atualizado_por: staff.discord_id, atualizado_em: nowIso() };
+        if (diff) auditApagar(staff, 'configuracao_entrevistas', '1', 'redefinida', diff.before, r.reason, { novo: diff.after });
         save();
         return ok(clone(state.escCfg));
       });
@@ -2398,15 +2536,48 @@ export function createMockAdapter({
       });
     },
 
-    async endEscala(escalaId) {
-      return run('endEscala', 'escalas.gerenciar', async ({ staff }) => {
+    async endEscala(escalaId, reason) {
+      return run('endEscala', 'escalas.cancelar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
         const e = state.escalas.find((x) => x.id === escalaId);
-        if (!e) return fail('NOT_FOUND', ESCALA_ERRORS.noEscala);
+        if (!e) return fail('NOT_FOUND', APAGAR_ERRORS.escala);
+        if (e.status === 'encerrada') return validationError({ _: APAGAR_ERRORS.escalaClosed });
         const before = e.status;
+        const today = new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 10);
+        const antes = {
+          periodo_inicio: e.periodo_inicio, periodo_fim: e.periodo_fim, status: before, publicado_em: e.publicado_em ?? null,
+          horarios: state.escSlots.filter((x) => x.escala_id === e.id).map(({ dia_semana, horario, discord_id, funcao }) => ({ dia_semana, horario, discord_id, funcao }))
+            .sort((a, b) => a.dia_semana - b.dia_semana || a.horario.localeCompare(b.horario) || a.discord_id.localeCompare(b.discord_id)),
+          sessoes_futuras: state.escSessoes.filter((x) => x.escala_id === e.id && x.status === 'agendada' && x.data_entrevista >= today).length,
+        };
         e.status = 'encerrada';
-        escLog('escala_encerrada', e.id, staff.discord_id, { status: before }, { status: 'encerrada' });
+        escLog('escala_encerrada', e.id, staff.discord_id, { status: before }, { status: 'encerrada', motivo: r.reason });
+        auditApagar(staff, 'escala', e.id, 'fechada', antes, r.reason);
         save();
         return ok(null);
+      });
+    },
+
+    /** Cancela a sessão e "avisa" os outros escalados (no banco de verdade, a função do Discord manda o privado). */
+    async cancelInterviewSession(id, reason) {
+      return run('cancelInterviewSession', 'escalas.cancelar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        const s = state.escSessoes.find((x) => x.id === id);
+        if (!s) return fail('NOT_FOUND', APAGAR_ERRORS.session);
+        if (['concluida', 'cancelada'].includes(s.status)) return validationError({ _: APAGAR_ERRORS.sessionClosed });
+        const people = state.escPart.filter((p) => p.sessao_id === id && p.presente);
+        const before = s.status;
+        s.status = 'cancelada';
+        escLog('sessao_cancelada', s.id, staff.discord_id, { status: before }, { status: 'cancelada', motivo: r.reason });
+        auditApagar(staff, 'sessao_entrevista', s.id, 'cancelada', {
+          data_entrevista: s.data_entrevista, horario: s.horario, status: before, escala_id: s.escala_id ?? null,
+          participantes: people.map((p) => ({ discord_id: p.discord_id, funcao: p.funcao })),
+        }, r.reason);
+        save();
+        const others = people.filter((p) => p.discord_id !== staff.discord_id);
+        return ok({ session: escPresentSession(s), dm: others.length ? { sent: others.length, failed: [] } : null, discord_error: null });
       });
     },
 

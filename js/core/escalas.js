@@ -89,6 +89,7 @@ export const ESC_HISTORY_LABELS = Object.freeze({
   slot_realocado: 'Horário realocado', substituicao_registrada: 'Substituição registrada', ausencia_registrada: 'Ausência registrada',
   sessao_em_andamento: 'Sessão iniciada', sessao_cancelada: 'Sessão cancelada', registro_criado: 'Registro criado', registro_editado: 'Registro editado',
   registro_discord_enviado: 'Registro enviado ao Discord', aviso_enviado: 'Aviso enviado', aviso_falhou: 'Falha no aviso',
+  cancelamento_avisado: 'Cancelamento avisado no privado',
 });
 
 const escClean = (v) => String(v ?? '').trim();
@@ -352,6 +353,7 @@ export const ESC_DISCORD_ERRORS = Object.freeze({
   noChannel: 'Cadastre o ID do canal do Discord em Entrevistas › Configurações.',
   noBot: 'O envio pelo bot não está ligado. Peça à administração para guardar o token no Supabase (segredo DISCORD_BOT_TOKEN).',
   noRegistro: 'Esta sessão ainda não tem registro.',
+  notCancelled: 'A sessão não está cancelada.',
   noPrint: 'O print da call não foi encontrado.',
   cron: 'Segredo do agendador inválido.',
   channel: (status) => `O Discord recusou o envio no canal (HTTP ${status}). Confira o ID do canal e se o bot pode enviar mensagens nele.`,
@@ -418,6 +420,31 @@ export function buildSessionNoticeDm(session, participant, { siteUrl = '', now =
       fields: [
         { name: '◷ Quando', value: `${formatDateBr(session.data_entrevista)} às ${session.horario} (Brasília) · <t:${ts}:R>`, inline: false },
         { name: '✎ Sua função', value: ESC_ROLE_LABELS[participant.funcao] ?? participant.funcao, inline: true },
+      ],
+      timestamp: new Date(now).toISOString(),
+      footer: { text: 'Bloodlines RP · Entrevistas' },
+    }],
+  };
+}
+
+/**
+ * Documento 14 · privado avisando que a sessão foi cancelada (para os outros escalados). `motivo` é opcional.
+ * @param {{ data_entrevista: string, horario: string }} session
+ * @param {{ funcao: string }} participant
+ */
+export function buildSessionCancelDm(session, participant, { motivo = '', cancelledBy = '', now = new Date() } = {}) {
+  const why = escClean(motivo);
+  return {
+    content: 'Aviso: uma sessão de entrevista em que você estava escalado(a) foi cancelada.',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: `Entrevista das ${horarioLabel(session.horario)} cancelada`,
+      color: ESC_DISCORD.noticeColor,
+      fields: [
+        { name: '◷ Era em', value: `${formatDateBr(session.data_entrevista)} às ${session.horario} (Brasília)`, inline: false },
+        { name: '✎ Sua função', value: ESC_ROLE_LABELS[participant.funcao] ?? participant.funcao, inline: true },
+        ...(escClean(cancelledBy) ? [{ name: '● Cancelada por', value: escClean(cancelledBy).slice(0, 80), inline: true }] : []),
+        ...(why ? [{ name: '↳ Motivo', value: why.slice(0, 300), inline: false }] : []),
       ],
       timestamp: new Date(now).toISOString(),
       footer: { text: 'Bloodlines RP · Entrevistas' },

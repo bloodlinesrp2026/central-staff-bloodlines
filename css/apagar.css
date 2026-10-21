@@ -1,0 +1,13 @@
+/* Documento 14 · janela de confirmação das ações destrutivas e botões de apagar. */
+.destroy-dialog { width: min(520px, calc(100vw - 2 * var(--space-4))); max-height: calc(100vh - 2 * var(--space-4)); overflow-y: auto; }
+.destroy-detail { padding: var(--space-3); border: 1px solid var(--danger-border); border-radius: var(--radius-md, 8px); background: var(--danger-bg); color: var(--text); overflow-wrap: anywhere; }
+.destroy-detail + .destroy-lose { margin-top: var(--space-3); }
+.destroy-lose { color: var(--text); }
+.destroy-audit { font-size: var(--fs-sm); color: var(--text-2); }
+.destroy-dialog .field { margin-top: var(--space-3); }
+.destroy-dialog .textarea { width: 100%; }
+.destroy-btn { margin-left: auto; }
+.char-card > .btn { margin-top: var(--space-2); }
+.audit-body { min-width: 0; }
+.audit-kept { margin-top: var(--space-1); font-size: var(--fs-sm); color: var(--text-2); }
+.audit-kept pre { margin: var(--space-1) 0 0; padding: var(--space-2); max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md, 8px); background: var(--surface-1); white-space: pre-wrap; overflow-wrap: anywhere; }

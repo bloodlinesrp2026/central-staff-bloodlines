@@ -7,6 +7,7 @@ import { QUESTION_KINDS, QUESTION_SECTIONS } from '../../core/allowlist.js';
 import { LORE_LIMITS } from '../../core/lore.js';
 import { errorText } from './allowlist.js';
 import { renderMessage } from './message.js';
+import { canDestroy, runDestructive } from '../destructive.js';
 
 /**
  * Campo de formulário com rótulo e erro. `control` pode ser input, textarea ou select.
@@ -69,19 +70,32 @@ export function renderGabarito(app) {
     draw();
   }
 
-  const row = (item, title, meta, onEdit) => h('li', { class: `staff-row${item.active ? '' : ' staff-row--off'}`, dataset: { id: item.id } },
+  // Permissão e instalação do SQL 25 conferidas uma vez ao abrir a tela (o banco confere de novo ao apagar).
+  const erasable = canDestroy(app, 'gabarito.apagar');
+  const erase = (kind, item, title) => runDestructive(app, kind, {
+    detail: h('p', {}, h('strong', {}, title)),
+    call: (reason) => (kind === 'question' ? app.adapter.deleteInterviewQuestion(item.id, reason) : app.adapter.deleteChecklistItem(item.id, reason)),
+    okMessage: kind === 'question' ? 'Pergunta apagada. O texto ficou guardado na auditoria.' : 'Item apagado. O texto ficou guardado na auditoria.',
+    onDone: () => load(),
+  });
+
+  const row = (item, title, meta, onEdit, kind) => h('li', { class: `staff-row${item.active ? '' : ' staff-row--off'}`, dataset: { id: item.id } },
     h('div', { class: 'staff-who' }, h('p', { class: 'staff-name' }, title), h('p', { class: 'staff-meta' }, meta)),
     h('div', { class: 'staff-tags' }, statusBadge(item.active)),
     h('div', { class: 'staff-actions' },
-      h('button', { type: 'button', class: 'btn btn--sm', 'aria-label': `Editar: ${title}`, onclick: onEdit }, icon('pencil'), 'Editar')));
+      h('button', { type: 'button', class: 'btn btn--sm', 'aria-label': `Editar: ${title}`, onclick: onEdit }, icon('pencil'), 'Editar'),
+      erasable && h('button', {
+        type: 'button', class: 'btn btn--sm btn--ghost btn--danger', dataset: { action: 'erase' }, 'data-requires-online': '',
+        'aria-label': `Apagar para sempre: ${title}`, onclick: () => erase(kind, item, title),
+      }, icon('trash'), 'Apagar')));
 
   function draw() {
     const vis = (x) => showOff || x.active;
     const qs = data.questions.filter(vis);
-    qList.replaceChildren(...(qs.length ? qs.map((q) => row(q, q.question, `${q.position} · ${q.section} · ${QUESTION_KINDS[q.kind] ?? q.kind}`, () => openQuestion(q)))
+    qList.replaceChildren(...(qs.length ? qs.map((q) => row(q, q.question, `${q.position} · ${q.section} · ${QUESTION_KINDS[q.kind] ?? q.kind}`, () => openQuestion(q), 'question'))
       : [h('li', { class: 'staff-empty' }, 'Nenhuma pergunta.')]));
     const cs = data.items.filter(vis);
-    cList.replaceChildren(...(cs.length ? cs.map((c) => row(c, c.text, `Etapa ${c.stage} (${c.stage_title}) · ordem ${c.position}${c.hint ? ` · ${c.hint}` : ''}`, () => openItem(c)))
+    cList.replaceChildren(...(cs.length ? cs.map((c) => row(c, c.text, `Etapa ${c.stage} (${c.stage_title}) · ordem ${c.position}${c.hint ? ` · ${c.hint}` : ''}`, () => openItem(c), 'item'))
       : [h('li', { class: 'staff-empty' }, 'Nenhum item.')]));
   }
 

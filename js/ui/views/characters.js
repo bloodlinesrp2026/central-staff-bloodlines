@@ -10,6 +10,7 @@ import { normalizeName } from '../../core/allowlist.js';
 import { CHARACTER_STATUSES, LORE_LIMITS, NOTE_ABOUT, PHOTO_MIMES, photoError } from '../../core/lore.js';
 import { errorText } from './allowlist.js';
 import { formField, showFieldErrors } from './gabarito.js';
+import { canDestroy, runDestructive } from '../destructive.js';
 import { renderMessage } from './message.js';
 
 const denied = (app) => {
@@ -55,6 +56,15 @@ export function renderCharacters(app) {
             Object.entries(CHARACTER_STATUSES).map(([v, t]) => h('option', { value: v }, t))))),
       count, grid)));
 
+  // Permissão e instalação do SQL 25 conferidas uma vez ao abrir a tela (o banco confere de novo ao remover).
+  const removable = canDestroy(app, 'personagens.apagar');
+  const removeCharacter = (c) => runDestructive(app, 'character', {
+    detail: h('p', {}, h('strong', {}, c.character_name), ` · ${c.discord_name} · ID da Cidade ${c.city_id}`),
+    call: (reason) => app.adapter.deleteCharacter(c.id, reason),
+    okMessage: `Personagem ${c.character_name} removido.`,
+    onDone: () => { all = all.filter((x) => x.id !== c.id); draw(); app.applyOnline(); },
+  });
+
   async function load() {
     const res = await app.adapter.listCharacters();
     if (!alive) return;
@@ -74,7 +84,11 @@ export function renderCharacters(app) {
         h('span', { class: 'char-info' },
           h('span', { class: 'char-name' }, c.character_name),
           h('span', { class: 'char-meta' }, `${c.discord_name} · ID da Cidade ${c.city_id}`),
-          statusBadge(c.status)))))
+          statusBadge(c.status))),
+      removable && h('button', {
+        type: 'button', class: 'btn btn--sm btn--ghost btn--danger', dataset: { action: 'remove' }, 'data-requires-online': '',
+        'aria-label': `Remover o personagem ${c.character_name}`, onclick: () => removeCharacter(c),
+      }, icon('trash'), 'Remover')))
       : [h('li', { class: 'staff-empty' }, all.length ? 'Nenhum personagem encontrado.' : 'Nenhum personagem cadastrado ainda.')]));
   }
 
@@ -128,8 +142,17 @@ export function renderCharacter(app, id) {
       c && h('p', { class: 'panel-text' }, `Cadastrado por ${c.created_by_name ?? c.created_by} em ${formatDate(c.created_at, { time: true })}`,
         c.version > 1 ? ` · alterado por ${c.updated_by_name ?? c.updated_by} em ${formatDate(c.updated_at, { time: true })}` : ''),
       general,
-      canEdit && h('div', { class: 'form-actions' },
-        h('button', { type: 'submit', class: 'btn btn--primary', id: 'char-save', 'data-requires-online': '' }, icon('device-floppy'), creating ? 'Cadastrar' : 'Salvar')));
+      (canEdit || (c && canDestroy(app, 'personagens.apagar'))) && h('div', { class: 'form-actions' },
+        canEdit && h('button', { type: 'submit', class: 'btn btn--primary', id: 'char-save', 'data-requires-online': '' }, icon('device-floppy'), creating ? 'Cadastrar' : 'Salvar'),
+        c && canDestroy(app, 'personagens.apagar') && h('button', {
+          type: 'button', class: 'btn btn--ghost btn--danger', id: 'char-remove', 'data-requires-online': '',
+          onclick: () => runDestructive(app, 'character', {
+            detail: h('p', {}, h('strong', {}, c.character_name), ` · ${c.discord_name} · ID da Cidade ${c.city_id}`),
+            call: (reason) => app.adapter.deleteCharacter(c.id, reason),
+            okMessage: `Personagem ${c.character_name} removido.`,
+            onDone: () => app.router.go('#/lore/personagens'),
+          }),
+        }, icon('trash'), 'Remover personagem')));
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const values = Object.fromEntries(Object.entries(fields).map(([k, f]) => [k, f.input.value]));

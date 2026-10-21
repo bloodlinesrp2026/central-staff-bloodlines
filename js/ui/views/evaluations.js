@@ -9,6 +9,7 @@
 // exportação do período e as decisões da Direção (registradas no Painel da Diretoria, aba Decisões).
 import { downloadText, h, icon, toast } from '../dom.js';
 import { confirmDialog } from '../modal.js';
+import { canDestroy, runDestructive } from '../destructive.js';
 import { formatDate, roleBadge } from '../components.js';
 import { roleLabel, roleLevel } from '../../core/permissions.js';
 import {
@@ -439,6 +440,17 @@ export function renderEvaluation(app, id) {
           toast('Avaliação arquivada.');
           app.router.go('#/avaliacoes-equipe');
         } }, icon('archive'), 'Arquivar')),
+      // Documento 14 · só quem recebeu avaliacoes.apagar (padrão: CEO). O conteúdo completo fica na auditoria.
+      canDestroy(app, 'avaliacoes.apagar') && e.status !== 'rascunho' && h('div', { class: 'panel-actions' },
+        h('button', {
+          type: 'button', class: 'btn btn--ghost btn--danger', id: 'eval-erase', 'data-requires-online': '',
+          onclick: () => runDestructive(app, 'evaluation', {
+            detail: h('p', {}, h('strong', {}, e.evaluated_name ?? e.evaluated_id), ` · avaliada por ${e.evaluator_name ?? e.evaluator_id}${period ? ` · ${period.title}` : ''}`),
+            call: (reason) => app.adapter.eraseEvaluation(e.id, reason),
+            okMessage: 'Avaliação apagada. Uma cópia completa ficou na auditoria.',
+            onDone: () => { app.refreshCounts(); app.router.go('#/avaliacoes-equipe'); },
+          }),
+        }, icon('trash'), 'Apagar avaliação')),
     ].filter(Boolean));
     app.applyOnline();
     if (r.read && e.evaluator_id !== me && e.status === 'enviada' && !e.read_at) {

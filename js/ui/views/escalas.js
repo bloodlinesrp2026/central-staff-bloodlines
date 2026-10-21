@@ -13,6 +13,26 @@ import {
 } from '../../core/escalas.js';
 import { formField, showFieldErrors } from './gabarito.js';
 import { renderMessage } from './message.js';
+import { runDestructive } from '../destructive.js';
+
+/**
+ * Documento 14 · cancelar sessão (escalas.cancelar; escalas.gerenciar no banco sem o SQL 25). Pede motivo, grava na auditoria
+ * e avisa no privado os outros escalados. Quem chama decide se mostra o botão.
+ */
+export const canCancelSession = (app) => (app.feature('apagar') ? app.can('escalas.cancelar') : app.can('escalas.gerenciar'));
+export function cancelSessionFlow(app, s, onDone) {
+  return runDestructive(app, 'session', {
+    detail: h('p', {}, h('strong', {}, `${formatDateBr(s.data_entrevista)} às ${horarioLabel(s.horario)}`)),
+    call: (reason) => app.adapter.cancelInterviewSession(s.id, reason),
+    okMessage: (res) => {
+      const { dm, discord_error: failed } = res.data;
+      if (failed) return `Sessão cancelada. O aviso no privado não foi enviado: ${failed}`;
+      if (dm?.failed?.length) return `Sessão cancelada. ${dm.sent} avisada(s) no privado; ${dm.failed.length} sem privado.`;
+      return dm?.sent ? `Sessão cancelada. ${dm.sent} pessoa(s) avisada(s) no privado.` : 'Sessão cancelada.';
+    },
+    onDone,
+  });
+}
 
 /* ---------------------------------------------------------------------------
  * Partes compartilhadas (a Gestão da Direção reaproveita)
@@ -97,7 +117,8 @@ export function renderEscalas(app, tabKey) {
     const mine = sessions.data.filter((s) => isSessionParticipant(s, me));
     const upcoming = mine.filter((s) => s.data_entrevista >= today && !['cancelada', 'registro_concluido', 'concluida'].includes(s.view) && s.view !== 'registro_pendente');
     const pending = mine.filter((s) => s.view === 'registro_pendente');
-    const card = (s) => {
+    const canCancel = canCancelSession(app);
+    const card = (s, { cancellable = false } = {}) => {
       const role = s.participantes.find((p) => p.discord_id === me)?.funcao;
       return h('article', { class: 'esc-card', dataset: { id: s.id } },
         h('div', { class: 'esc-card-head' },
@@ -108,7 +129,12 @@ export function renderEscalas(app, tabKey) {
             h('p', { class: 'esc-line' }, peopleLine(s.participantes)))),
         h('div', { class: 'esc-actions' },
           h('a', { class: 'btn btn--sm btn--primary', href: `#/entrevistas/sessao/${s.id}` }, icon('clipboard-text'), s.view === 'registro_pendente' ? 'Fazer o registro' : 'Abrir sessão'),
-          copyButton(() => interviewMessage(s.horario, config), { label: 'Copiar mensagem', ariaLabel: `Copiar a mensagem da entrevista das ${horarioLabel(s.horario)}` })));
+          copyButton(() => interviewMessage(s.horario, config), { label: 'Copiar mensagem', ariaLabel: `Copiar a mensagem da entrevista das ${horarioLabel(s.horario)}` }),
+          cancellable && canCancel && h('button', {
+            type: 'button', class: 'btn btn--sm btn--danger', dataset: { action: 'cancel-session' }, 'data-requires-online': '',
+            'aria-label': `Cancelar a sessão das ${horarioLabel(s.horario)} de ${formatDateBr(s.data_entrevista)}`,
+            onclick: () => cancelSessionFlow(app, s, () => drawMine().then(() => app.applyOnline())),
+          }, icon('circle-x'), 'Cancelar sessão')));
     };
     const mySlots = (escala.data?.slots ?? []).filter((s) => s.discord_id === me);
     const published = escala.data?.escala?.status === 'publicada';
@@ -120,7 +146,7 @@ export function renderEscalas(app, tabKey) {
       h('section', { class: 'esc-section', id: 'esc-upcoming' },
         h('h2', { class: 'block-title' }, icon('calendar-event'), 'Próximos horários'),
         upcoming.length
-          ? h('div', { class: 'esc-list' }, upcoming.map(card))
+          ? h('div', { class: 'esc-list' }, upcoming.map((s) => card(s, { cancellable: ['agendada', 'em_andamento'].includes(s.status) })))
           : h('div', { class: 'esc-empty', id: 'esc-mine-empty' }, icon('calendar-off'), h('p', {}, 'Você não está escalado(a) para as próximas entrevistas.'))),
       published && mySlots.length > 0 && h('section', { class: 'esc-section' },
         h('h2', { class: 'block-title' }, icon('list-check'), 'Seus horários na escala'),
@@ -362,7 +388,7 @@ export function renderEscalaSessao(app, id) {
           allowed && h('button', { type: 'button', class: 'btn btn--sm btn--primary', id: 'esc-start', hidden: !(s.status === 'agendada' && !closed), 'data-requires-online': '', onclick: () => start(s) }, icon('player-play'), 'Iniciar sessão'),
           allowed && copyButton(() => interviewMessage(s.horario, config), { label: 'Copiar mensagem da entrevista', ariaLabel: 'Copiar a mensagem da entrevista' }),
           canManage && !s.aviso_enviado && !closed && h('button', { type: 'button', class: 'btn btn--sm', id: 'esc-notice', 'data-requires-online': '', onclick: () => notice(s) }, icon('bell'), 'Enviar aviso agora'),
-          canManage && !['cancelada', 'concluida'].includes(s.status) && h('button', { type: 'button', class: 'btn btn--sm btn--danger', id: 'esc-cancel', 'data-requires-online': '', onclick: () => cancel(s) }, icon('circle-x'), 'Cancelar sessão')),
+          canCancelSession(app) && !['cancelada', 'concluida'].includes(s.status) && h('button', { type: 'button', class: 'btn btn--sm btn--danger', id: 'esc-cancel', 'data-requires-online': '', onclick: () => cancel(s) }, icon('circle-x'), 'Cancelar sessão')),
         h('h2', { class: 'block-title' }, icon('users'), 'Quem está nesta sessão'),
         present.length || g.ausentes.length
           ? h('ul', { class: 'esc-people', id: 'esc-people' }, [...present, ...g.ausentes].map(personRow))
@@ -385,10 +411,7 @@ export function renderEscalaSessao(app, id) {
     const go = await confirmDialog({ title: 'Iniciar a sessão?', message: `A sessão das ${horarioLabel(s.horario)} passa para Em andamento.`, confirmLabel: 'Iniciar' });
     if (go) await refreshWith(await app.adapter.setInterviewSessionStatus(s.id, 'em_andamento'), '✓ Sessão iniciada.');
   }
-  async function cancel(s) {
-    const go = await confirmDialog({ title: 'Cancelar a sessão?', message: `A sessão das ${horarioLabel(s.horario)} será marcada como cancelada.`, confirmLabel: 'Cancelar sessão', cancelLabel: 'Voltar', danger: true });
-    if (go) await refreshWith(await app.adapter.setInterviewSessionStatus(s.id, 'cancelada'), 'Sessão cancelada.');
-  }
+  const cancel = (s) => cancelSessionFlow(app, s, () => load());
   async function notice(s) {
     const go = await confirmDialog({ title: 'Enviar o aviso agora?', message: 'O aviso vai para o canal de avisos e para o privado de cada escalado, uma vez só.', confirmLabel: 'Enviar aviso' });
     if (!go) return;

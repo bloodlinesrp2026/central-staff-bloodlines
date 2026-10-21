@@ -18,6 +18,7 @@ import {
   validateBlockedName, validateCharacter, validateCharacterNote, validateChecklistItem, validateQuestion,
 } from '../core/lore.js';
 import { PRODUCTIVITY_ERRORS } from '../core/productivity.js';
+import { APAGAR_ERRORS, validateReason } from '../core/apagar.js';
 import { RULE_ERRORS, pickRule, validateRule } from '../core/rules.js';
 import {
   AREA_DISCORD_ID, AREA_ERRORS, AREA_MANAGE_ERRORS, AREA_ROLES, DEFAULT_AREA_COLOR, DEFAULT_TAG_COLOR, areaProcedureAccess, areaSlug, historyRange,
@@ -2072,11 +2073,17 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
       return res;
     },
 
-    async endEscala(escalaId) {
-      const { error: g } = await guard('escalas.gerenciar');
+    async endEscala(escalaId, reason) {
+      const { staff, error: g } = await guard();
       if (g) return g;
-      const { error, status } = await sb.rpc('encerrar_escala', { p_escala: escalaId });
-      return error ? failFrom(error, status) : ok(null);
+      // Banco sem o SQL 25: a função antiga (sem motivo e sem auditoria própria).
+      if (!staff.features.includes('apagar')) {
+        if (!staff.permissions.includes('escalas.gerenciar')) return fail('FORBIDDEN');
+        const { error, status } = await sb.rpc('encerrar_escala', { p_escala: escalaId });
+        return error ? failFrom(error, status) : ok(null);
+      }
+      const res = await destroy('escalas.cancelar', 'fechar_escala', { p_escala: escalaId }, reason);
+      return res.error ? res : ok(null);
     },
 
     async reallocateSlot(slotId, novoId) {
@@ -2219,6 +2226,63 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
       return res;
     },
 
+    /* ----- Documento 14: apagar, remover, cancelar e redefinir com auditoria (25_apagar_auditoria.sql) ----- */
+    async deleteCharacter(id, reason) {
+      const res = await destroy('personagens.apagar', 'apagar_personagem', { p_id: id }, reason);
+      return res.error ? res : ok(null);
+    },
+
+    async cancelInterviewSession(id, reason) {
+      const { staff, error: g } = await guard();
+      if (g) return g;
+      // Banco sem o SQL 25: a troca de estado antiga (só a Direção, sem motivo e sem aviso).
+      if (!staff.features.includes('apagar')) {
+        if (!staff.permissions.includes('escalas.gerenciar')) return fail('FORBIDDEN');
+        const old = await adapter.setInterviewSessionStatus(id, 'cancelada');
+        return old.error ? old : ok({ session: old.data, dm: null, discord_error: null });
+      }
+      const res = await destroy('escalas.cancelar', 'cancelar_sessao_agendada', { p_sessao: id }, reason);
+      if (res.error) return res;
+      // A sessão já está cancelada no banco; o aviso no privado é um extra e a falha dele só vira um recado.
+      const sent = await invokeSend({ action: 'avisar_cancelamento_entrevista', sessao_id: id, motivo: validateReason(reason).reason });
+      const detail = await adapter.getInterviewSession(id);
+      return ok({
+        session: detail.error ? null : detail.data,
+        dm: sent.error ? null : sent.data?.dm ?? null,
+        discord_error: sent.error ? escDiscordError(sent.error) : null,
+      });
+    },
+
+    async resetEscalaConfig(reason) {
+      const res = await destroy('escalas.redefinir', 'redefinir_configuracao_entrevistas', {}, reason);
+      return res.error ? res : escReadConfig();
+    },
+
+    async eraseEvaluation(id, reason) {
+      const res = await destroy('avaliacoes.apagar', 'apagar_avaliacao', { p_id: id }, reason);
+      return res.error ? res : ok(null);
+    },
+
+    async deleteOccurrence(id, reason) {
+      const res = await destroy('ocorrencias.apagar', 'apagar_ocorrencia', { p_id: id }, reason);
+      return res.error ? res : ok(null);
+    },
+
+    async cancelAlignment(id, reason) {
+      const res = await destroy('alinhamentos.apagar', 'cancelar_alinhamento', { p_id: id }, reason);
+      return res.error ? res : ok(null);
+    },
+
+    async deleteInterviewQuestion(id, reason) {
+      const res = await destroy('gabarito.apagar', 'apagar_pergunta', { p_id: id }, reason);
+      return res.error ? res : ok(null);
+    },
+
+    async deleteChecklistItem(id, reason) {
+      const res = await destroy('gabarito.apagar', 'apagar_item_checklist', { p_id: id }, reason);
+      return res.error ? res : ok(null);
+    },
+
     async listEscalaHistory({ limit = 100 } = {}) {
       const { error: g } = await guard('escalas.gerenciar');
       if (g) return g;
@@ -2313,6 +2377,20 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
     if (payload?.error?.code) return fail(payload.error.code, payload.error.message, payload.error.details);
     if (response.status === 404) return fail('NETWORK', DISCORD_SEND_ERRORS.missingFunction);
     return failFrom({ message: payload?.message ?? error.message }, response.status);
+  }
+
+  /**
+   * Documento 14 · chama a função do banco que apaga, cancela ou redefine. O banco confere a permissão e grava a auditoria
+   * (quem, cargo, quando, o que existia antes e o motivo); aqui só a resposta rápida e a tradução do erro.
+   */
+  async function destroy(permission, fn, args, reason) {
+    const { staff, error: g } = await guard(permission);
+    if (g) return g;
+    if (!staff.features.includes('apagar')) return fail('NETWORK', APAGAR_ERRORS.notInstalled);
+    const check = validateReason(reason);
+    if (!check.valid) return validation({ _: check.error });
+    const { data, error, status } = await sb.rpc(fn, { ...args, p_motivo: check.reason });
+    return error ? failFrom(error, status) : ok(data ?? null);
   }
 
   /** Muda o status só se a reunião está no estado esperado (from); o banco também só deixa andar para a frente. */
