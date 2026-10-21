@@ -19,6 +19,7 @@ import {
 } from '../core/lore.js';
 import { PRODUCTIVITY_ERRORS } from '../core/productivity.js';
 import { APAGAR_ERRORS, validateReason } from '../core/apagar.js';
+import { PLAYLIST_ERRORS, validatePlaylistName } from '../core/playlists.js';
 import { RULE_ERRORS, pickRule, validateRule } from '../core/rules.js';
 import {
   AREA_DISCORD_ID, AREA_ERRORS, AREA_MANAGE_ERRORS, AREA_ROLES, DEFAULT_AREA_COLOR, DEFAULT_TAG_COLOR, areaProcedureAccess, areaSlug, historyRange,
@@ -2253,6 +2254,59 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
       });
     },
 
+    /* ----- Playlists pessoais do gabarito (SQL 27) ----- */
+    async listMyPlaylists() {
+      const g = await playlistGuard();
+      if (g.error) return g.error;
+      return playlistCall('listar_minhas_playlists', {}, (data) => data ?? []);
+    },
+
+    async createPlaylist(name) {
+      const g = await playlistGuard();
+      if (g.error) return g.error;
+      const v = validatePlaylistName(name);
+      if (!v.valid) return validation({ _: v.error });
+      return playlistCall('criar_playlist', { p_nome: v.name });
+    },
+
+    async renamePlaylist(id, name) {
+      const g = await playlistGuard();
+      if (g.error) return g.error;
+      const v = validatePlaylistName(name);
+      if (!v.valid) return validation({ _: v.error });
+      return playlistCall('renomear_playlist', { p_playlist: id, p_novo_nome: v.name });
+    },
+
+    async deletePlaylist(id) {
+      const g = await playlistGuard();
+      if (g.error) return g.error;
+      return playlistCall('apagar_playlist', { p_playlist: id }, () => null);
+    },
+
+    async listPlaylistQuestions(id) {
+      const g = await playlistGuard();
+      if (g.error) return g.error;
+      return playlistCall('listar_perguntas_playlist', { p_playlist: id }, (data) => data ?? []);
+    },
+
+    async addQuestionToPlaylist(id, questionId) {
+      const g = await playlistGuard();
+      if (g.error) return g.error;
+      return playlistCall('adicionar_pergunta_playlist', { p_playlist: id, p_pergunta: questionId }, () => null);
+    },
+
+    async removeQuestionFromPlaylist(id, questionId) {
+      const g = await playlistGuard();
+      if (g.error) return g.error;
+      return playlistCall('remover_pergunta_playlist', { p_playlist: id, p_pergunta: questionId }, () => null);
+    },
+
+    async setPlaylistQuestions(id, questionIds) {
+      const g = await playlistGuard();
+      if (g.error) return g.error;
+      return playlistCall('definir_perguntas_playlist', { p_playlist: id, p_perguntas: [...new Set(questionIds ?? [])] }, () => null);
+    },
+
     /** SQL 26: apaga as sessões agendadas que ainda não começaram (e, por padrão, encerra a escala publicada). */
     async clearInterviewAgenda({ reason, closeEscala = true } = {}) {
       const { staff, error: g } = await guard('escalas.cancelar');
@@ -2393,6 +2447,22 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
    * Documento 14 · chama a função do banco que apaga, cancela ou redefine. O banco confere a permissão e grava a auditoria
    * (quem, cargo, quando, o que existia antes e o motivo); aqui só a resposta rápida e a tradução do erro.
    */
+  /** Playlists (SQL 27): quem usa o gabarito e o banco já com o SQL. */
+  async function playlistGuard() {
+    const { staff, can, error } = await guard();
+    if (error) return { error };
+    if (!usesAllowlist(can)) return { error: fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden) };
+    if (!staff.features.includes('playlists')) return { error: fail('NETWORK', PLAYLIST_ERRORS.notInstalled) };
+    return { staff };
+  }
+  async function playlistCall(fn, args, pick = (data) => data) {
+    const { data, error, status } = await sb.rpc(fn, args);
+    if (!error) return ok(pick(data));
+    if (error.code === 'KB404') return fail('NOT_FOUND', error.message);
+    if (error.code === 'KB422') return validation({ _: error.message });
+    return failFrom(error, status);
+  }
+
   async function destroy(permission, fn, args, reason) {
     const { staff, error: g } = await guard(permission);
     if (g) return g;

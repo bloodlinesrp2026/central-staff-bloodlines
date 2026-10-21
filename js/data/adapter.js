@@ -464,6 +464,18 @@
  * @property {(id: string, reason?: string) => Result<null>} deleteInterviewQuestion    gabarito.apagar. Apaga a pergunta; as análises antigas guardam a cópia do texto.
  * @property {(id: string, reason?: string) => Result<null>} deleteChecklistItem    gabarito.apagar.
  *
+ * Playlists pessoais de perguntas do gabarito (27_playlists_gabarito.sql; regras em js/core/playlists.js). Só quem usa o gabarito
+ * (allowlist.avaliar, allowlist.historico ou lore.gerenciar); cada pessoa vê e mexe só nas próprias (de outra = NOT_FOUND). Exigem a feature
+ * 'playlists' (sem ela: NETWORK com a mensagem de instalação). Até 10 por pessoa; nome de 1 a 50 caracteres, sem emojis (VALIDATION).
+ * @property {() => Result<Array<{ id: string, nome: string, total: number, criado_em: string, atualizado_em: string }>>} listMyPlaylists   Mais antigas primeiro; total = perguntas ativas.
+ * @property {(name: string) => Result<{ id: string, nome: string, total: number }>} createPlaylist
+ * @property {(id: string, name: string) => Result<{ id: string, nome: string }>} renamePlaylist
+ * @property {(id: string) => Result<null>} deletePlaylist    Apaga a playlist e as ligações; o gabarito não muda.
+ * @property {(id: string) => Result<Array<InterviewQuestion & { ordem: number }>>} listPlaylistQuestions   Perguntas ativas, na ordem da playlist.
+ * @property {(id: string, questionId: string) => Result<null>} addQuestionToPlaylist   Já estar na playlist não é erro.
+ * @property {(id: string, questionId: string) => Result<null>} removeQuestionFromPlaylist
+ * @property {(id: string, questionIds: string[]) => Result<null>} setPlaylistQuestions   Troca todas de uma vez, na ordem da lista.
+ *
  * Etapa 10 · produtividade (13_produtividade.sql; conta em js/core/productivity.js)
  * @property {(p: { from: string, to: string }) => Result<Productivity>} getProductivity   produtividade.ver. to exclusivo.
  * @property {() => Result<Array<{ discord_id: string, display_name: string }>>} listStaffNames   Staff: nomes de toda a equipe.
@@ -511,6 +523,7 @@ export const ADAPTER_METHODS = Object.freeze([
   'sendInterviewNotice', 'listEscalaHistory',
   'deleteCharacter', 'cancelInterviewSession', 'resetEscalaConfig', 'eraseEvaluation', 'deleteOccurrence', 'cancelAlignment',
   'deleteInterviewQuestion', 'deleteChecklistItem', 'clearInterviewAgenda',
+  'listMyPlaylists', 'createPlaylist', 'renamePlaylist', 'deletePlaylist', 'listPlaylistQuestions', 'addQuestionToPlaylist', 'removeQuestionFromPlaylist', 'setPlaylistQuestions',
 ]);
 
 /** Campos da análise que o cliente pode definir (o resto é do servidor). */
@@ -575,7 +588,7 @@ export const WEBHOOK_COLUMNS = Object.freeze([
 ]);
 
 /** Módulos que o banco pode ter (Staff.features). */
-export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'apagar', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'escalas', 'limpar_agenda', 'lore', 'perfil', 'produtividade', 'regras']);
+export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'apagar', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'escalas', 'limpar_agenda', 'lore', 'perfil', 'playlists', 'produtividade', 'regras']);
 
 /** Campos que o cliente pode definir. Todo o resto é do servidor. */
 export const EDITABLE_FIELDS = Object.freeze([

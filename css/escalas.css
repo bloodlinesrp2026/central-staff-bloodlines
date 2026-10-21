@@ -175,3 +175,7 @@
   .esc-agenda[data-mode="mes"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .esc-dl { grid-template-columns: 1fr; }
 }
+
+/* Print único do registro: mesma área de arrastar/colar da Allowlist, sem ser botão. */
+.al-drop--static { cursor: default; margin-top: var(--space-2); }
+.al-thumbs--single { grid-template-columns: minmax(0, 220px); }

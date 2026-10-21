@@ -15,6 +15,9 @@ import {
 } from '../../core/allowlist.js';
 import { renderMessage } from './message.js';
 import { createDraft } from '../draft.js';
+import { listenPaste } from '../print-drop.js';
+import { openPlaylistManager } from '../playlists-dialog.js';
+import { questionsForPlaylist } from '../../core/playlists.js';
 
 const FLAG_TONE = { ev1: 'ok', ev2: 'ok', ev3: 'bad', ev4: 'bad', ev5: 'warn' };
 const FLAG_MARK = { ev1: 'ꪜ', ev2: 'ꪜ', ev3: '✘', ev4: '✘', ev5: '⚠' };
@@ -25,6 +28,25 @@ const TITLES = { allowlist: 'Análise de allowlist', entrevista: 'Entrevista' };
 const BASE = { allowlist: '#/allowlist', entrevista: '#/entrevista' };
 /** Checklist da entrevista aberto ou fechado: só na memória desta aba (começa fechado). */
 let checklistOpen = false;
+/** Playlist escolhida no gabarito: só na memória desta aba (a escolha vale na próxima entrevista). */
+let selectedPlaylist = '';
+
+/**
+ * Dados que o histórico entrega ao formulário novo ("Nova allowlist" / "Nova entrevista" na ficha).
+ * Ficam na memória e são usados uma vez só, pelo formulário do mesmo tipo; sem isso o formulário abre vazio.
+ */
+const PREFILL_KEYS = ['author_handle', 'player_discord_id', 'player_age', 'character_name'];
+let pendingPrefill = null;
+export function setFormPrefill(kind, ev) {
+  const data = {};
+  for (const k of PREFILL_KEYS) if (ev?.[k] != null && String(ev[k]).trim()) data[k] = String(ev[k]);
+  pendingPrefill = { kind, data };
+}
+function takePrefill(kind) {
+  const got = pendingPrefill;
+  pendingPrefill = null;
+  return got && got.kind === kind ? got.data : null;
+}
 
 /** Sem o módulo no banco ou sem allowlist.avaliar: mensagem e nada mais. */
 export function alDenied(app, need = 'allowlist.avaliar') {
@@ -197,6 +219,7 @@ export function renderAlForm(app, kind, id = null) {
   let dirty = false;
   let cleanupBuild = () => {};
   let draft = null; // rascunho automático (a análise/entrevista aberta)
+  let prefill = id ? null : takePrefill(kind); // vindo da ficha do histórico (só em formulário novo)
   const body = h('div', {}, h('p', { class: 'panel-text' }, 'Carregando…'));
   app.els.main.replaceChildren(h('div', { class: `main-inner al-page al-page--${kind}` },
     h('a', { class: 'back', href: '#/avaliacoes' }, icon('arrow-left'), 'Histórico de allowlist e entrevistas'),
@@ -208,13 +231,14 @@ export function renderAlForm(app, kind, id = null) {
     body));
 
   async function load() {
-    const [names, items, questions, current, urls, staffNames] = await Promise.all([
+    const [names, items, questions, current, urls, staffNames, playlists] = await Promise.all([
       app.adapter.listBlockedNames(),
       kind === 'entrevista' ? app.adapter.listChecklistItems() : Promise.resolve({ data: [] }),
       kind === 'entrevista' ? app.adapter.listInterviewQuestions() : Promise.resolve({ data: [] }),
       id ? app.adapter.getAlEvaluation(id) : Promise.resolve({ data: null }),
       id ? app.adapter.getAlPrintUrls(id) : Promise.resolve({ data: [] }),
       kind === 'entrevista' ? app.adapter.listStaffNames() : Promise.resolve({ data: [] }),
+      kind === 'entrevista' && app.feature('playlists') ? app.adapter.listMyPlaylists() : Promise.resolve({ data: null }),
     ]);
     if (!alive) return;
     const err = [names, items, questions, current].find((r) => r.error);
@@ -225,7 +249,7 @@ export function renderAlForm(app, kind, id = null) {
       return;
     }
     const urlOf = new Map((urls.data ?? []).map((u) => [u.id, u.url]));
-    const config = { index: buildNameIndex(names.data), items: items.data, questions: questions.data, staff: staffNames.data ?? [] };
+    const config = { index: buildNameIndex(names.data), items: items.data, questions: questions.data, staff: staffNames.data ?? [], playlists: playlists.data, playlistsError: playlists.error ?? null };
     build(ev, config, (ev?.attachments ?? []).map((a) => ({ ...a, url: urlOf.get(a.id) ?? '' })).filter((a) => a.url));
   }
 
@@ -242,6 +266,10 @@ export function renderAlForm(app, kind, id = null) {
       participants: (ev?.participants ?? []).filter((p) => p.role !== 'responsavel').map((p) => ({ discord_id: p.discord_id, role: p.role })),
       answers: new Map((ev?.answers ?? []).filter((a) => a.question_id).map((a) => [a.question_id, { note: a.note, send: a.send_to_discord }])),
     };
+    if (!ev && !restored && prefill) {
+      Object.assign(st, prefill);
+      prefill = null;
+    }
     if (restored) {
       // Rascunho recuperado: volta o que estava escrito (os prints são arquivos e não ficam no rascunho).
       for (const k of DRAFT_TEXT) if (typeof restored[k] === 'string') st[k] = restored[k];
@@ -323,11 +351,7 @@ export function renderAlForm(app, kind, id = null) {
 
     /* ---------- prints ---------- */
     const prints = printsBox(attachments, touch);
-    const onPaste = (e) => {
-      const files = [...(e.clipboardData?.files ?? [])].filter((x) => x.type.startsWith('image/'));
-      if (files.length) { e.preventDefault(); prints.add(files); }
-    };
-    document.addEventListener('paste', onPaste);
+    const stopPaste = listenPaste((files) => prints.add(files));
 
     /* ---------- checklist e gabarito (entrevista) ---------- */
     const checklist = kind === 'entrevista' ? checklistSection() : null;
@@ -381,6 +405,7 @@ export function renderAlForm(app, kind, id = null) {
 
     function gabaritoSection() {
       const notes = [];
+      const cards = []; // caixinha "enviar no resultado" de cada pergunta mostrada
       const sections = [...new Set(config.questions.map((q) => q.section))];
       const card = (q, n) => {
         const a = st.answers.get(q.id) ?? { note: '', send: false };
@@ -400,17 +425,88 @@ export function renderAlForm(app, kind, id = null) {
         send.addEventListener('change', save);
         note.addEventListener('input', save);
         notes.push(note);
+        cards.push({ id: q.id, send, note });
         return h('li', { class: 'al-q', dataset: { questionId: q.id } },
           h('div', { class: 'al-q-head' }, send, h('span', { class: `al-kind al-kind--${q.kind}` }, QUESTION_KINDS[q.kind] ?? q.kind), toggle),
           answer, note);
       };
-      let n = 0;
+
+      /* Playlists pessoais (SQL 27): filtram o que aparece; as marcas e anotações ficam em st.answers e não se perdem ao trocar. */
+      let playlists = config.playlists;
+      let current = null; // { id, ids } da playlist em uso; null = todas as perguntas
+      const groups = h('div', { class: 'al-q-groups', id: 'al-q-groups' });
+      function drawQuestions() {
+        notes.length = 0;
+        cards.length = 0;
+        let n = 0;
+        if (!current) {
+          groups.replaceChildren(...sections.map((sec) => h('div', { class: 'al-q-section' }, h('h3', { class: 'al-q-section-title' }, sec),
+            h('ol', { class: 'al-q-list' }, config.questions.filter((q) => q.section === sec).map((q) => card(q, ++n))))));
+          return;
+        }
+        const shown = questionsForPlaylist(config.questions, current.ids);
+        groups.replaceChildren(shown.length
+          ? h('ol', { class: 'al-q-list' }, shown.map((q) => card(q, ++n)))
+          : h('p', { class: 'panel-text', id: 'al-playlist-empty' }, 'Esta playlist não tem perguntas. Abra "Minhas playlists" para escolher.'));
+      }
+      /** Marca ou desmarca "enviar no resultado" de todas as perguntas que estão na tela. */
+      function markAll(value) {
+        for (const c of cards) {
+          c.send.checked = value;
+          st.answers.set(c.id, { note: c.note.value, send: value });
+        }
+        touch();
+      }
+      const select = h('select', { class: 'input input--sm', id: 'al-playlist-select', 'aria-label': 'Perguntas do gabarito' });
+      async function choose(id) {
+        if (!id) { current = null; selectedPlaylist = ''; drawQuestions(); return; }
+        const res = await app.adapter.listPlaylistQuestions(id);
+        if (!alive) return;
+        if (res.error) {
+          toast(errorText(res.error), 4000);
+          current = null;
+          selectedPlaylist = '';
+          drawSelect();
+          drawQuestions();
+          return;
+        }
+        current = { id, ids: res.data.map((q) => q.id) };
+        selectedPlaylist = id;
+        drawQuestions();
+      }
+      function drawSelect() {
+        const want = current?.id ?? '';
+        select.replaceChildren(h('option', { value: '' }, 'Todas as perguntas'),
+          ...(playlists ?? []).map((pl) => h('option', { value: pl.id }, `Playlist: ${pl.nome} (${pl.total})`)));
+        select.value = (playlists ?? []).some((pl) => pl.id === want) ? want : '';
+      }
+      select.addEventListener('change', () => choose(select.value));
+      const bar = playlists == null && !config.playlistsError ? null : h('div', { class: 'pl-bar', id: 'al-playlist-bar' },
+        config.playlistsError
+          ? h('p', { class: 'field-hint' }, 'Não foi possível carregar suas playlists.')
+          : h('label', { class: 'filter' }, h('span', { class: 'filter-label' }, 'Perguntas'), select),
+        h('div', { class: 'pl-bar-actions' },
+          h('button', { type: 'button', class: 'btn btn--sm', id: 'al-playlist-manage', 'data-requires-online': '', onclick: async () => {
+            await openPlaylistManager(app, { questions: config.questions });
+            const res = await app.adapter.listMyPlaylists();
+            if (!alive) return;
+            if (!res.error) playlists = res.data;
+            drawSelect();
+            // A playlist em uso pode ter sido apagada ou mudado de perguntas.
+            await choose(select.value);
+          } }, icon('playlist'), 'Minhas playlists'),
+          h('button', { type: 'button', class: 'btn btn--sm', id: 'al-mark-all', onclick: () => markAll(true) }, icon('checks'), 'Marcar todas'),
+          h('button', { type: 'button', class: 'btn btn--sm btn--ghost', id: 'al-unmark-all', onclick: () => markAll(false) }, 'Desmarcar todas')));
+      drawSelect();
+      drawQuestions();
+      // Volta para a playlist que estava em uso na entrevista anterior (se ainda existir).
+      if (selectedPlaylist && (playlists ?? []).some((pl) => pl.id === selectedPlaylist)) { select.value = selectedPlaylist; choose(selectedPlaylist); }
+
       return {
         el: h('section', { class: 'panel', 'aria-labelledby': 'al-gabarito-title' },
           h('h2', { class: 'block-title', id: 'al-gabarito-title' }, icon('book-2'), 'Gabarito'),
           h('p', { class: 'panel-text' }, 'Clique na pergunta para ver a resposta esperada. Marque a caixinha das perguntas que devem ir no resultado para o Discord.'),
-          sections.map((s) => h('div', { class: 'al-q-section' }, h('h3', { class: 'al-q-section-title' }, s),
-            h('ol', { class: 'al-q-list' }, config.questions.filter((q) => q.section === s).map((q) => card(q, ++n))))),
+          bar, groups,
           h('div', { class: 'panel-actions' }, h('button', { type: 'button', class: 'btn btn--ghost', id: 'al-notes-clear', onclick: async () => {
             if (!await confirmDialog({ title: 'Limpar as anotações?', message: 'Apaga todas as anotações do gabarito.', confirmLabel: 'Limpar', danger: true })) return;
             for (const el of notes) el.value = '';
@@ -609,7 +705,7 @@ export function renderAlForm(app, kind, id = null) {
       if (!dirty) return true;
       return confirmDialog({ title: 'Sair sem salvar?', message: 'A análise ainda não foi salva no histórico.', confirmLabel: 'Sair sem salvar', cancelLabel: 'Continuar', danger: true });
     });
-    cleanupBuild = () => { draft?.stop(); document.removeEventListener('paste', onPaste); prints.dispose(); };
+    cleanupBuild = () => { draft?.stop(); stopPaste(); prints.dispose(); };
   }
 
   load();

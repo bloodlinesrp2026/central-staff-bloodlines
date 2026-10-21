@@ -7,7 +7,7 @@
 import { debounce, h, icon } from '../dom.js';
 import { copyButton, formatDate } from '../components.js';
 import { copyText, evaluationLines } from '../../core/allowlist.js';
-import { alDenied, errorText, sendBox } from './allowlist.js';
+import { alDenied, errorText, sendBox, setFormPrefill } from './allowlist.js';
 
 const KIND_LABEL = { allowlist: 'Allowlist', entrevista: 'Entrevista' };
 const STATUS_LABEL = { aprovado: '✓ Aprovada', reprovado: '✗ Reprovada' };
@@ -152,9 +152,15 @@ export function renderAlDetail(app, id) {
           ? h('ul', { class: 'al-thumbs', id: 'al-detail-prints' }, urls.map((u, i) => h('li', { class: 'al-thumb' },
             h('a', { href: u.url, target: '_blank', rel: 'noopener noreferrer' }, h('img', { src: u.url, alt: `Print ${i + 1}` })))))
           : h('p', { class: 'panel-text' }, e.attachments.length ? 'Prints indisponíveis.' : 'Sem prints (ou já apagados depois de 90 dias).')),
-      mine && h('div', { class: 'form-actions al-actions' }, sendBox(app, {
-        kind: e.kind, sentAt: e.sent_to_discord_at, getId: async () => e.id, onSent: () => load(),
-      })),
+      (mine || app.can('allowlist.avaliar')) && h('div', { class: 'form-actions al-actions' },
+        // Abre o formulário novo do mesmo tipo já com autor, Discord ID, personagem e idade desta ficha.
+        app.can('allowlist.avaliar') && h('a', {
+          class: 'btn btn--primary', id: 'al-again', href: e.kind === 'allowlist' ? '#/allowlist' : '#/entrevista',
+          onclick: () => setFormPrefill(e.kind, e),
+        }, icon(e.kind === 'allowlist' ? 'file-text' : 'microphone'), e.kind === 'allowlist' ? 'Nova allowlist' : 'Nova entrevista'),
+        mine && sendBox(app, {
+          kind: e.kind, sentAt: e.sent_to_discord_at, getId: async () => e.id, onSent: () => load(),
+        })),
     ].filter(Boolean));
     app.applyOnline();
   }

@@ -13,6 +13,7 @@ import {
   validateWebhook, EVALUATION_REMINDER_ERRORS, EVALUATION_REMINDER_KINDS, evaluationReminderRecipients,
 } from '../core/allowlist.js';
 import { APAGAR_ERRORS, validateReason } from '../core/apagar.js';
+import { PLAYLIST_ERRORS, canCreatePlaylist, validatePlaylistName } from '../core/playlists.js';
 import {
   EVALUATION_DECISION_ERRORS, criteriaNotesError, decisionTargetError, justificationError, pickCriterion, resolvedAction, validateDecision,
 } from '../core/avaliacoes.js';
@@ -251,6 +252,8 @@ export function createMockAdapter({
   }
 
   /* ---------- entrevistas: escala e registro ---------- */
+  /** Playlists do gabarito (SQL 27): as da pessoa logada. */
+  const plMine = (staff) => (state.playlists ?? []).filter((p) => p.discord_id === staff.discord_id);
   const escCanRead = (can) => can('allowlist.avaliar') || can('escalas.gerenciar');
   const escEligible = (discordId) => {
     const s = state.staff.find((x) => x.discord_id === discordId && x.active);
@@ -2578,6 +2581,103 @@ export function createMockAdapter({
         save();
         const others = people.filter((p) => p.discord_id !== staff.discord_id);
         return ok({ session: escPresentSession(s), dm: others.length ? { sent: others.length, failed: [] } : null, discord_error: null });
+      });
+    },
+
+    /* ----- Playlists pessoais do gabarito (SQL 27): cada pessoa só enxerga as próprias ----- */
+    async listMyPlaylists() {
+      return run('listMyPlaylists', 'staff', async ({ staff, can }) => {
+        if (!usesAllowlist(can)) return fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden);
+        const activeIds = new Set(state.questions.filter((q) => q.active).map((q) => q.id));
+        return ok(plMine(staff).sort((a, b) => a.criado_em.localeCompare(b.criado_em))
+          .map((p) => ({ id: p.id, nome: p.nome, total: p.perguntas.filter((id) => activeIds.has(id)).length, criado_em: p.criado_em, atualizado_em: p.atualizado_em })));
+      });
+    },
+
+    async createPlaylist(name) {
+      return run('createPlaylist', 'staff', async ({ staff, can }) => {
+        if (!usesAllowlist(can)) return fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden);
+        const v = validatePlaylistName(name);
+        if (!v.valid) return fail('VALIDATION', v.error, { errors: { _: v.error } });
+        if (!canCreatePlaylist(plMine(staff).length)) return fail('VALIDATION', PLAYLIST_ERRORS.limit, { errors: { _: PLAYLIST_ERRORS.limit } });
+        const at = nowIso();
+        const row = { id: uuid(), discord_id: staff.discord_id, nome: v.name, perguntas: [], criado_em: at, atualizado_em: at };
+        (state.playlists ??= []).push(row);
+        save();
+        return ok({ id: row.id, nome: row.nome, total: 0, criado_em: at, atualizado_em: at });
+      });
+    },
+
+    async renamePlaylist(id, name) {
+      return run('renamePlaylist', 'staff', async ({ staff, can }) => {
+        if (!usesAllowlist(can)) return fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden);
+        const p = plMine(staff).find((x) => x.id === id);
+        if (!p) return fail('NOT_FOUND', PLAYLIST_ERRORS.notFound);
+        const v = validatePlaylistName(name);
+        if (!v.valid) return fail('VALIDATION', v.error, { errors: { _: v.error } });
+        p.nome = v.name;
+        p.atualizado_em = nowIso();
+        save();
+        return ok({ id: p.id, nome: p.nome });
+      });
+    },
+
+    async deletePlaylist(id) {
+      return run('deletePlaylist', 'staff', async ({ staff, can }) => {
+        if (!usesAllowlist(can)) return fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden);
+        const p = plMine(staff).find((x) => x.id === id);
+        if (!p) return fail('NOT_FOUND', PLAYLIST_ERRORS.notFound);
+        state.playlists = state.playlists.filter((x) => x.id !== p.id);
+        save();
+        return ok(null);
+      });
+    },
+
+    async listPlaylistQuestions(id) {
+      return run('listPlaylistQuestions', 'staff', async ({ staff, can }) => {
+        if (!usesAllowlist(can)) return fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden);
+        const p = plMine(staff).find((x) => x.id === id);
+        if (!p) return fail('NOT_FOUND', PLAYLIST_ERRORS.notFound);
+        const byId = new Map(state.questions.filter((q) => q.active).map((q) => [q.id, q]));
+        return ok(p.perguntas.map((qid, ordem) => (byId.has(qid) ? { ...presentConfig(byId.get(qid)), ordem } : null)).filter(Boolean));
+      });
+    },
+
+    async addQuestionToPlaylist(id, questionId) {
+      return run('addQuestionToPlaylist', 'staff', async ({ staff, can }) => {
+        if (!usesAllowlist(can)) return fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden);
+        const p = plMine(staff).find((x) => x.id === id);
+        if (!p) return fail('NOT_FOUND', PLAYLIST_ERRORS.notFound);
+        if (!state.questions.some((q) => q.id === questionId)) return fail('NOT_FOUND', PLAYLIST_ERRORS.question);
+        if (!p.perguntas.includes(questionId)) p.perguntas.push(questionId);
+        p.atualizado_em = nowIso();
+        save();
+        return ok(null);
+      });
+    },
+
+    async removeQuestionFromPlaylist(id, questionId) {
+      return run('removeQuestionFromPlaylist', 'staff', async ({ staff, can }) => {
+        if (!usesAllowlist(can)) return fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden);
+        const p = plMine(staff).find((x) => x.id === id);
+        if (!p) return fail('NOT_FOUND', PLAYLIST_ERRORS.notFound);
+        p.perguntas = p.perguntas.filter((q) => q !== questionId);
+        p.atualizado_em = nowIso();
+        save();
+        return ok(null);
+      });
+    },
+
+    async setPlaylistQuestions(id, questionIds) {
+      return run('setPlaylistQuestions', 'staff', async ({ staff, can }) => {
+        if (!usesAllowlist(can)) return fail('FORBIDDEN', PLAYLIST_ERRORS.forbidden);
+        const p = plMine(staff).find((x) => x.id === id);
+        if (!p) return fail('NOT_FOUND', PLAYLIST_ERRORS.notFound);
+        const known = new Set(state.questions.map((q) => q.id));
+        p.perguntas = [...new Set(questionIds ?? [])].filter((q) => known.has(q));
+        p.atualizado_em = nowIso();
+        save();
+        return ok(null);
       });
     },
 

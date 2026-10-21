@@ -12,6 +12,7 @@ import {
   isSessionParticipant, sessionStart, slotsByCell, sortDays, sortHorarios, validateRegistro, weekdayOf,
 } from '../../core/escalas.js';
 import { formField, showFieldErrors } from './gabarito.js';
+import { singlePrintPicker } from '../print-drop.js';
 import { renderMessage } from './message.js';
 import { runDestructive } from '../destructive.js';
 
@@ -378,7 +379,8 @@ export function renderEscalaSessao(app, id) {
   let staffNames = [];
   const slot = h('div', {}, h('p', { class: 'panel-text' }, 'Carregando…'));
   app.els.main.replaceChildren(h('div', { class: 'main-inner esc-page' }, slot));
-  const stopDraft = () => { draft?.stop(); draft = null; };
+  let stopPrint = () => {}; // escuta do Ctrl+V do formulário de registro
+  const stopDraft = () => { draft?.stop(); draft = null; stopPrint(); stopPrint = () => {}; };
 
   async function load() {
     const [res, base] = await Promise.all([app.adapter.getInterviewSession(id), loadBase(app)]);
@@ -527,10 +529,13 @@ export function renderEscalaSessao(app, id) {
       print: formField('esc-edit-print', 'Trocar o print (opcional)', h('input', { class: 'input', type: 'file', accept: 'image/png,image/jpeg,image/webp' })),
     };
     const general = h('p', { class: 'field-error form-general-error', role: 'alert', hidden: true });
+    const editPicker = singlePrintPicker(fields.print.input);
+    fields.print.el.insertBefore(editPicker.el, fields.print.error);
     const body2 = h('div', { id: 'esc-edit-form' }, fields.total_entrevistados.el, fields.observacoes.el, fields.print.el, general);
     const go = await openDialog({ title: 'Editar registro', body: body2, actions: [{ label: 'Cancelar', value: false, variant: 'ghost' }, { label: 'Salvar', value: true, variant: 'primary', autofocus: true }] });
-    if (!go) return;
     const file = fields.print.input.files?.[0] ?? null;
+    editPicker.dispose();
+    if (!go) return;
     const res = await app.adapter.editInterviewRegistro(s.id, {
       total_entrevistados: fields.total_entrevistados.input.value, observacoes: fields.observacoes.input.value,
       print: file ? { name: file.name, type: file.type, size: file.size, blob: file } : null,
@@ -567,6 +572,9 @@ export function renderEscalaSessao(app, id) {
       print: formField('esc-reg-print', 'Print da call * (PNG, JPG ou WEBP, até 8 MB)', h('input', { class: 'input', type: 'file', accept: 'image/png,image/jpeg,image/webp' }),
         'Mostre quem estava na call da entrevista e quem estava aguardando na fila.'),
     };
+    const picker = singlePrintPicker(fields.print.input);
+    fields.print.el.insertBefore(picker.el, fields.print.error);
+    stopPrint = picker.dispose;
     const peopleError = h('p', { class: 'field-error', id: 'esc-reg-people-err', hidden: true });
     const general = h('p', { class: 'field-error form-general-error', role: 'alert', hidden: true });
     const submit = h('button', { type: 'submit', class: 'btn btn--primary', id: 'esc-reg-preview', 'data-requires-online': '' }, icon('eye'), 'Revisar e registrar');
