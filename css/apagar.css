@@ -7,6 +7,36 @@
 .destroy-dialog .field { margin-top: var(--space-3); }
 .destroy-dialog .textarea { width: 100%; }
 .destroy-btn { margin-left: auto; }
+
+/* ---------- Botões de ação perigosa (apagar, cancelar, limpar, encerrar) ---------- */
+/* Contorno vermelho discreto: chama atenção sem gritar; vira preenchido ao passar o mouse. */
+.btn--danger-outline,
+.esc-page .btn--danger {
+  background: transparent; border-color: var(--danger-border); color: var(--text);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.btn--danger-outline .ti,
+.esc-page .btn--danger .ti { color: var(--danger); transition: color var(--dur) var(--ease); }
+.btn--danger-outline:hover:not(:disabled),
+.esc-page .btn--danger:hover:not(:disabled) { background: var(--danger-bg); border-color: var(--danger); box-shadow: 0 2px 10px rgba(192, 57, 43, .22); }
+.btn--danger-outline:active:not(:disabled),
+.esc-page .btn--danger:active:not(:disabled) { transform: translateY(1px); box-shadow: none; }
+.btn--danger-outline:focus-visible,
+.esc-page .btn--danger:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; }
+
+/* Botão de confirmar na janela: vermelho cheio, só liberado depois de CONFIRMAR (quando pedido). */
+.destroy-dialog .btn--danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+.destroy-dialog .btn--danger-solid .ti { color: #fff; }
+.destroy-dialog .btn--danger-solid:hover:not(:disabled) { background: #e0584a; border-color: #e0584a; }
+.destroy-dialog .btn--danger-solid:active:not(:disabled) { transform: translateY(1px); }
+.destroy-dialog .btn--danger-solid:focus-visible,
+.destroy-dialog .btn--ghost:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+.destroy-dialog .btn--danger-solid:disabled { background: var(--danger-bg); border-color: var(--danger-border); color: var(--text-2); }
+.destroy-dialog .btn--danger-solid:disabled .ti { color: var(--text-2); }
+.destroy-dialog .dialog-actions { gap: var(--space-2); }
+.esc-clear-detail { display: grid; gap: var(--space-2); }
+.esc-clear-detail p { margin: 0; }
+.esc-clear-detail .esc-check { display: inline-flex; gap: var(--space-2); align-items: center; font-size: var(--fs-sm); cursor: pointer; }
 .char-card > .btn { margin-top: var(--space-2); }
 .audit-body { min-width: 0; }
 .audit-kept { margin-top: var(--space-1); font-size: var(--fs-sm); color: var(--text-2); }

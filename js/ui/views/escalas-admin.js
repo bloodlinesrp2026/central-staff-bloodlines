@@ -9,7 +9,7 @@ import {
 } from '../../core/escalas.js';
 import { formField, showFieldErrors } from './gabarito.js';
 import { renderMessage } from './message.js';
-import { countdownText, scheduleTable } from './escalas.js';
+import { clearAgendaButton, countdownText, scheduleTable } from './escalas.js';
 import { canDestroy, runDestructive } from '../destructive.js';
 
 const TABS = Object.freeze([['escala', 'Escala', '#/entrevistas/gestao'], ['configuracoes', 'Configurações', '#/entrevistas/gestao/configuracoes'], ['historico', 'Histórico', '#/entrevistas/gestao/historico']]);
@@ -283,7 +283,8 @@ export function renderEscalasAdmin(app, tabKey) {
           await drawPanel();
         } }, icon('send'), 'Reenviar ao Discord'),
         h('a', { class: 'btn btn--ghost', href: '#/entrevistas/gestao/historico' }, icon('history'), 'Ver escalas anteriores'),
-        canEndEscala && h('button', { type: 'button', class: 'btn btn--danger', id: 'esc-end', 'data-requires-online': '', onclick: () => runDestructive(app, 'escala', {
+        clearAgendaButton(app, () => drawPanel(), { small: false }),
+        canEndEscala && h('button', { type: 'button', class: 'btn btn--danger-outline', id: 'esc-end', 'data-requires-online': '', onclick: () => runDestructive(app, 'escala', {
           detail: h('p', {}, h('strong', {}, `Escala ${formatDateBr(escala.periodo_inicio)} a ${formatDateBr(escala.periodo_fim)}`), ` · ${cells.size} horário(s) na grade`),
           call: (reason) => app.adapter.endEscala(escala.id, reason),
           okMessage: 'Escala encerrada.',
@@ -381,7 +382,7 @@ export function renderEscalasAdmin(app, tabKey) {
     const when = (iso) => new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
     const summaryOf = (x) => {
       const d = x.dados_novos ?? {};
-      return [d.periodo_inicio && `${formatDateBr(d.periodo_inicio)} a ${formatDateBr(d.periodo_fim)}`, d.status && ESC_STATUS_LABELS[d.status], d.sessoes_criadas != null && `${d.sessoes_criadas} sessão(ões)`,
+      return [d.sessoes_apagadas != null && `${d.sessoes_apagadas} sessão(ões) apagada(s)`, d.periodo_inicio &&`${formatDateBr(d.periodo_inicio)} a ${formatDateBr(d.periodo_fim)}`, d.status && ESC_STATUS_LABELS[d.status], d.sessoes_criadas != null && `${d.sessoes_criadas} sessão(ões)`,
         d.motivo, d.total_entrevistados != null && `${d.total_entrevistados} entrevistado(s)`].filter(Boolean).join(' · ');
     };
     body.replaceChildren(

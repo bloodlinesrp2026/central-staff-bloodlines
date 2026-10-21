@@ -453,6 +453,10 @@
  * @property {(id: string, reason?: string) => Result<null>} deleteCharacter    personagens.apagar. Marca como removido e libera o nome (some da lista).
  * @property {(id: string, reason?: string) => Result<{ session: object, dm: { sent: number, failed: string[] }|null, discord_error: string|null }>} cancelInterviewSession
  *           escalas.cancelar (escalas.gerenciar no banco antigo). Cancela a sessão e avisa no privado os outros escalados.
+ * @property {(o?: { reason?: string, closeEscala?: boolean }) => Result<{ sessoes_apagadas: number, escalas_encerradas: number }>} clearInterviewAgenda
+ *           escalas.cancelar + feature 'limpar_agenda' (SQL 26). Apaga todas as sessões agendadas que ainda não começaram e não têm registro
+ *           (Minha escala e Agenda ficam limpas) e, com closeEscala (padrão true), encerra a escala publicada. Ninguém é avisado no privado.
+ *           VALIDATION se não há nada para limpar. Auditoria + histórico da escala.
  * @property {(reason?: string) => Result<object>} resetEscalaConfig    escalas.redefinir. Dias, horários, antecedência e mensagem voltam ao padrão; canais e cargos ficam.
  * @property {(id: string, reason?: string) => Result<null>} eraseEvaluation    avaliacoes.apagar. Só enviada ou arquivada; o conteúdo completo vai para a auditoria.
  * @property {(id: string, reason?: string) => Result<null>} deleteOccurrence    ocorrencias.apagar. O texto completo vai para a auditoria.
@@ -506,7 +510,7 @@ export const ADAPTER_METHODS = Object.freeze([
   'registerSubstitution', 'registerAbsence', 'registerInterview', 'editInterviewRegistro', 'getInterviewPrintUrl', 'sendInterviewRegistro',
   'sendInterviewNotice', 'listEscalaHistory',
   'deleteCharacter', 'cancelInterviewSession', 'resetEscalaConfig', 'eraseEvaluation', 'deleteOccurrence', 'cancelAlignment',
-  'deleteInterviewQuestion', 'deleteChecklistItem',
+  'deleteInterviewQuestion', 'deleteChecklistItem', 'clearInterviewAgenda',
 ]);
 
 /** Campos da análise que o cliente pode definir (o resto é do servidor). */
@@ -571,7 +575,7 @@ export const WEBHOOK_COLUMNS = Object.freeze([
 ]);
 
 /** Módulos que o banco pode ter (Staff.features). */
-export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'apagar', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'escalas', 'lore', 'perfil', 'produtividade', 'regras']);
+export const FEATURES = Object.freeze(['agenda', 'alinhamento', 'allowlist', 'apagar', 'areas', 'aprovacao', 'auditoria', 'avaliacoes', 'avaliacoes_area', 'avaliacoes_decisoes', 'avisos', 'diretoria', 'discord_cargos', 'escalas', 'limpar_agenda', 'lore', 'perfil', 'produtividade', 'regras']);
 
 /** Campos que o cliente pode definir. Todo o resto é do servidor. */
 export const EDITABLE_FIELDS = Object.freeze([

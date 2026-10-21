@@ -9,7 +9,7 @@ import { attachFormDraft } from '../draft.js';
 import {
   ESCALA_ERRORS, ESC_LIMITS, ESC_PARTICIPANT_ROLES, ESC_ROLE_LABELS, ESC_SESSION_STATUS_LABELS, ESC_HISTORY_LABELS,
   ESC_WEEKDAYS, ESC_WEEKDAYS_SHORT, brasiliaToday, cellKey, formatDateBr, groupParticipants, horarioLabel, interviewMessage,
-  isSessionParticipant, slotsByCell, sortDays, sortHorarios, validateRegistro, weekdayOf,
+  isSessionParticipant, sessionStart, slotsByCell, sortDays, sortHorarios, validateRegistro, weekdayOf,
 } from '../../core/escalas.js';
 import { formField, showFieldErrors } from './gabarito.js';
 import { renderMessage } from './message.js';
@@ -33,6 +33,38 @@ export function cancelSessionFlow(app, s, onDone) {
     onDone,
   });
 }
+
+/**
+ * Limpar a agenda inteira (SQL 26, feature "limpar_agenda"; escalas.cancelar): apaga as sessões agendadas que ainda não começaram,
+ * em Minha escala e na Agenda, e (opcional) encerra a escala publicada. Pede CONFIRMAR e motivo; auditoria no banco.
+ */
+export const canClearAgenda = (app) => app.feature('apagar') && app.feature('limpar_agenda') && app.can('escalas.cancelar');
+export async function clearAgendaFlow(app, onDone) {
+  const [sessions, escala] = await Promise.all([app.adapter.listInterviewSessions({ from: '2000-01-01', to: '2100-12-31' }), app.adapter.getEscala()]);
+  if (sessions.error) { app.reportError(sessions.error, 'Não foi possível conferir a agenda.'); return false; }
+  const now = Date.now();
+  const doomed = sessions.data.filter((s) => s.status === 'agendada' && !s.tem_registro && sessionStart(s.data_entrevista, s.horario).getTime() >= now);
+  const published = escala.data?.escala?.status === 'publicada';
+  if (!doomed.length && !published) { toast('Não há sessões agendadas para limpar.'); return false; }
+  const close = h('input', { type: 'checkbox', id: 'esc-clear-close', checked: published, disabled: !published });
+  const detail = h('div', { class: 'esc-clear-detail' },
+    h('p', {}, h('strong', {}, `${doomed.length} sessão(ões) agendada(s)`), ' serão apagadas.'),
+    published && h('label', { class: 'esc-check' }, close, ' Encerrar também a escala publicada (você poderá abrir outra)'));
+  return runDestructive(app, 'agenda', {
+    detail,
+    call: (reason) => app.adapter.clearInterviewAgenda({ reason, closeEscala: close.checked }),
+    okMessage: (res) => {
+      const { sessoes_apagadas: n, escalas_encerradas: e } = res.data;
+      return `✓ Agenda limpa: ${n} sessão(ões) apagada(s)${e ? ' e escala encerrada' : ''}.`;
+    },
+    onDone,
+  });
+}
+/** Botão "Limpar agenda" (mesmo visual nas telas das entrevistas). */
+export const clearAgendaButton = (app, onDone, { small = true } = {}) => canClearAgenda(app) && h('button', {
+  type: 'button', class: `btn${small ? ' btn--sm' : ''} btn--danger-outline`, id: 'esc-clear-agenda', 'data-requires-online': '',
+  title: 'Apaga todas as sessões agendadas que ainda não começaram', onclick: () => clearAgendaFlow(app, onDone),
+}, icon('calendar-off'), 'Limpar agenda');
 
 /* ---------------------------------------------------------------------------
  * Partes compartilhadas (a Gestão da Direção reaproveita)
@@ -138,7 +170,9 @@ export function renderEscalas(app, tabKey) {
     };
     const mySlots = (escala.data?.slots ?? []).filter((s) => s.discord_id === me);
     const published = escala.data?.escala?.status === 'publicada';
+    const clearBtn = clearAgendaButton(app, () => drawMine().then(() => app.applyOnline()));
     body.replaceChildren(
+      clearBtn && h('div', { class: 'esc-toolbar' }, clearBtn),
       pending.length > 0 && h('section', { class: 'esc-section', id: 'esc-pending' },
         h('h2', { class: 'block-title' }, icon('alert-triangle'), 'Registro pendente'),
         h('p', { class: 'panel-text' }, 'Estas entrevistas já aconteceram e ainda não têm o registro.'),
@@ -189,7 +223,8 @@ export function renderEscalas(app, tabKey) {
           h('button', { type: 'button', class: 'btn btn--sm', id: 'esc-prev', 'aria-label': 'Anterior', onclick: () => shift(-1) }, icon('chevron-left')),
           label,
           h('button', { type: 'button', class: 'btn btn--sm', id: 'esc-next', 'aria-label': 'Próximo', onclick: () => shift(1) }, icon('chevron-right')),
-          h('button', { type: 'button', class: 'btn btn--sm btn--ghost', id: 'esc-today', onclick: () => { cursor = brasiliaToday(); draw(); } }, 'Hoje')));
+          h('button', { type: 'button', class: 'btn btn--sm btn--ghost', id: 'esc-today', onclick: () => { cursor = brasiliaToday(); draw(); } }, 'Hoje')),
+        clearAgendaButton(app, async () => { selected = null; panel.hidden = true; await draw(); app.applyOnline(); }));
       const res = await app.adapter.listInterviewSessions({ from, to });
       if (!alive) return;
       if (res.error) { app.reportError(res.error, 'Não foi possível carregar a agenda.'); return; }

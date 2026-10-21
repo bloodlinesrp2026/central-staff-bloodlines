@@ -89,7 +89,7 @@ export const ESC_HISTORY_LABELS = Object.freeze({
   slot_realocado: 'Horário realocado', substituicao_registrada: 'Substituição registrada', ausencia_registrada: 'Ausência registrada',
   sessao_em_andamento: 'Sessão iniciada', sessao_cancelada: 'Sessão cancelada', registro_criado: 'Registro criado', registro_editado: 'Registro editado',
   registro_discord_enviado: 'Registro enviado ao Discord', aviso_enviado: 'Aviso enviado', aviso_falhou: 'Falha no aviso',
-  cancelamento_avisado: 'Cancelamento avisado no privado',
+  cancelamento_avisado: 'Cancelamento avisado no privado', agenda_limpa: 'Agenda das entrevistas limpa',
 });
 
 const escClean = (v) => String(v ?? '').trim();

@@ -2253,6 +2253,16 @@ export function createSupabaseAdapter({ client, redirectTo } = {}) {
       });
     },
 
+    /** SQL 26: apaga as sessões agendadas que ainda não começaram (e, por padrão, encerra a escala publicada). */
+    async clearInterviewAgenda({ reason, closeEscala = true } = {}) {
+      const { staff, error: g } = await guard('escalas.cancelar');
+      if (g) return g;
+      if (!staff.features.includes('limpar_agenda')) return fail('NETWORK', APAGAR_ERRORS.notInstalled.replace('SQL 25', 'SQL 26'));
+      const res = await destroy('escalas.cancelar', 'limpar_agenda', { p_encerrar_escala: closeEscala !== false }, reason);
+      if (res.error) return res;
+      return ok({ sessoes_apagadas: res.data?.sessoes_apagadas ?? 0, escalas_encerradas: res.data?.escalas_encerradas ?? 0 });
+    },
+
     async resetEscalaConfig(reason) {
       const res = await destroy('escalas.redefinir', 'redefinir_configuracao_entrevistas', {}, reason);
       return res.error ? res : escReadConfig();

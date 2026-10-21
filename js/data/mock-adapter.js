@@ -2581,6 +2581,37 @@ export function createMockAdapter({
       });
     },
 
+    /** Apaga as sessões agendadas que ainda não começaram e não têm registro; opcionalmente encerra a escala publicada (limpar_agenda, SQL 26). */
+    async clearInterviewAgenda({ reason, closeEscala = true } = {}) {
+      return run('clearInterviewAgenda', 'escalas.cancelar', async ({ staff }) => {
+        const r = reasonOf(reason);
+        if (r.error) return r.error;
+        const doomed = state.escSessoes
+          .filter((s) => s.status === 'agendada' && sessionStart(s.data_entrevista, s.horario).getTime() >= now().getTime() && !state.escRegs.some((x) => x.sessao_id === s.id))
+          .sort((a, b) => a.data_entrevista.localeCompare(b.data_entrevista) || a.horario.localeCompare(b.horario));
+        const published = closeEscala !== false ? state.escalas.filter((e) => e.status === 'publicada') : [];
+        if (!doomed.length && !published.length) return validationError({ _: APAGAR_ERRORS.agendaEmpty });
+        const lista = doomed.map((s) => ({
+          data_entrevista: s.data_entrevista, horario: s.horario, escala_id: s.escala_id ?? null,
+          participantes: state.escPart.filter((p) => p.sessao_id === s.id).map((p) => ({ discord_id: p.discord_id, funcao: p.funcao })),
+        }));
+        const fechadas = [];
+        for (const e of published) {
+          e.status = 'encerrada';
+          fechadas.push({ id: e.id, periodo_inicio: e.periodo_inicio, periodo_fim: e.periodo_fim });
+          escLog('escala_encerrada', e.id, staff.discord_id, { status: 'publicada' }, { status: 'encerrada', motivo: r.reason, origem: 'agenda_limpa' });
+        }
+        const ids = new Set(doomed.map((s) => s.id));
+        state.escSessoes = state.escSessoes.filter((s) => !ids.has(s.id));
+        state.escPart = state.escPart.filter((p) => !ids.has(p.sessao_id));
+        escLog('agenda_limpa', null, staff.discord_id, { sessoes: lista.length }, { sessoes_apagadas: lista.length, escalas_encerradas: fechadas.length, motivo: r.reason });
+        auditApagar(staff, 'agenda_entrevistas', 'todas', 'limpa', { sessoes: lista, escalas_encerradas: fechadas }, r.reason,
+          { sessoes_apagadas: lista.length, escalas_encerradas: fechadas.length });
+        save();
+        return ok({ sessoes_apagadas: lista.length, escalas_encerradas: fechadas.length });
+      });
+    },
+
     async reallocateSlot(slotId, novoId) {
       return run('reallocateSlot', 'escalas.gerenciar', async ({ staff }) => {
         const s = state.escSlots.find((x) => x.id === slotId);

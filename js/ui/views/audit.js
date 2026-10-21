@@ -11,7 +11,7 @@ export const AUDIT_ENTITIES = Object.freeze([
   ['procedimento', 'Arquivamentos'], ['avaliacao', 'Avaliações'], ['periodo', 'Períodos de avaliação'], ['aviso', 'Avisos'],
   ['webhook', 'Webhooks'], ['cargo_discord', 'Cargos no Discord'], ['nome_proibido', 'Nomes proibidos'], ['pergunta', 'Gabarito'], ['personagem', 'Personagens'],
   ['checklist', 'Checklist'], ['ocorrencia', 'Ocorrências'], ['alinhamento', 'Alinhamentos'], ['sessao_entrevista', 'Sessões de entrevista'],
-  ['escala', 'Escalas'], ['configuracao_entrevistas', 'Configurações das entrevistas'],
+  ['escala', 'Escalas'], ['agenda_entrevistas', 'Agenda das entrevistas'], ['configuracao_entrevistas', 'Configurações das entrevistas'],
 ]);
 const PAGE = 100;
 
@@ -73,6 +73,7 @@ function describeBase(e, name) {
     case 'alinhamento': return `Cancelou o alinhamento de ${b.membro_nome ?? name(b.membro_id)}`;
     case 'sessao_entrevista': return `Cancelou a sessão de entrevista de ${b.data_entrevista ? formatDateBr(b.data_entrevista) : ''} às ${b.horario ?? ''}`;
     case 'escala': return `Fechou a escala de ${b.periodo_inicio ? formatDateBr(b.periodo_inicio) : ''} a ${b.periodo_fim ? formatDateBr(b.periodo_fim) : ''}`;
+    case 'agenda_entrevistas': return `Limpou a agenda das entrevistas: ${a.sessoes_apagadas ?? b.sessoes?.length ?? 0} sessão(ões) apagada(s)${a.escalas_encerradas ? ` e ${a.escalas_encerradas} escala(s) encerrada(s)` : ''}`;
     case 'configuracao_entrevistas': return e.action === 'redefinida'
       ? `Redefiniu as configurações das entrevistas ao padrão (${Object.keys(b).join(', ')})`
       : `Alterou as configurações das entrevistas (${Object.keys(b).join(', ')})`;

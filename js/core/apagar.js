@@ -18,6 +18,7 @@ export const APAGAR_ERRORS = Object.freeze({
   sessionClosed: 'Esta sessão já foi encerrada.',
   escala: 'Escala não encontrada.',
   escalaClosed: 'Esta escala já foi encerrada.',
+  agendaEmpty: 'Não há sessões agendadas para apagar.',
   evaluation: 'Avaliação não encontrada.',
   evaluationDraft: 'Rascunho só o próprio autor apaga.',
   occurrence: 'Ocorrência não encontrada.',
@@ -32,6 +33,7 @@ export const APAGAR_ERRORS = Object.freeze({
 export const APAGAR_AUDIT_LABELS = Object.freeze({
   'sessao_entrevista:cancelada': 'Sessão de entrevista cancelada',
   'escala:fechada': 'Escala fechada',
+  'agenda_entrevistas:limpa': 'Agenda das entrevistas limpa',
   'configuracao_entrevistas:alterada': 'Configurações das entrevistas alteradas',
   'configuracao_entrevistas:redefinida': 'Configurações das entrevistas redefinidas ao padrão',
   'ocorrencia:apagada': 'Ocorrência apagada',
@@ -70,6 +72,10 @@ export const DESTRUCTIVE = Object.freeze({
   escala: {
     permission: 'escalas.cancelar', typed: false, title: 'Fechar a escala?', confirmLabel: 'Fechar escala',
     lose: 'A escala deixa de estar ativa e você poderá abrir uma nova. As sessões já criadas continuam na agenda. Os horários da escala ficam guardados na auditoria.',
+  },
+  agenda: {
+    permission: 'escalas.cancelar', typed: true, title: 'Limpar toda a agenda das entrevistas?', confirmLabel: 'Limpar agenda',
+    lose: 'Todas as sessões agendadas que ainda não começaram saem da Minha escala e da Agenda, junto com as pessoas escaladas nelas. Ninguém é avisado no privado. Ficam de fora as sessões em andamento, as que já têm registro e as que já passaram e esperam o registro. Não dá para desfazer; a lista completa do que existia fica na auditoria.',
   },
   config: {
     permission: 'escalas.redefinir', typed: false, title: 'Redefinir as configurações?', confirmLabel: 'Redefinir ao padrão',
